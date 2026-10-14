@@ -6,7 +6,7 @@ Flow: submitter requests -> finance classifies (capitalizable or expense) -> app
 
 ## Stack
 
-Node + Express, server-rendered pages, SQLite (`better-sqlite3`) on a Railway volume.
+Node + Express, server-rendered pages, SQLite (`better-sqlite3`) on a Railway volume. Uploaded documents (eligibility and measurement rules) are stored in `uploads/` on the same volume, linked to a request version, and counted as part of the approved terms.
 
 ## Environment variables
 

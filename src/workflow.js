@@ -77,8 +77,40 @@ function termsOf(data) {
   return o;
 }
 
-function hashTerms(data) {
-  return crypto.createHash('sha256').update(JSON.stringify(termsOf(data))).digest('hex');
+// The attached documents are part of the terms: a different file means different terms.
+function hashTerms(data, files) {
+  const shas = (files || []).map((f) => f.sha256).sort();
+  return crypto
+    .createHash('sha256')
+    .update(JSON.stringify({ terms: termsOf(data), files: shas }))
+    .digest('hex');
+}
+
+function attachmentsFor(requestId, version) {
+  if (requestId == null || version == null) return [];
+  return db
+    .prepare('SELECT * FROM attachments WHERE request_id = ? AND version = ? ORDER BY id')
+    .all(requestId, version);
+}
+
+// Copy carried-over files and record newly uploaded ones against a request version.
+function saveAttachments(user, requestId, version, carried, uploaded) {
+  const ins = db.prepare(
+    `INSERT INTO attachments (request_id, version, field, original_name, stored_name, mime, size, sha256, uploaded_by)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  );
+  for (const f of carried) {
+    ins.run(requestId, version, f.field, f.original_name, f.stored_name, f.mime, f.size, f.sha256, f.uploaded_by);
+  }
+  for (const f of uploaded) {
+    ins.run(requestId, version, 'eligibility', f.original_name, f.stored_name, f.mime, f.size, f.sha256, user.id);
+    audit(user, 'attachment.added', 'request', requestId, requestId, {
+      version,
+      file: f.original_name,
+      sha256: f.sha256,
+      size: f.size,
+    });
+  }
 }
 
 function isValidTz(tz) {
@@ -180,7 +212,13 @@ function validate(type, input, user, opts) {
   need('description', 'Description of how it works', 50);
   d.payout_structure = s('payout_structure');
   if (!['flat_rate', 'calculated'].includes(d.payout_structure)) errors.payout_structure = 'Choose a payout structure.';
-  need('eligibility', 'Eligibility and measurement rules', 20);
+  // Rules can be typed, attached as a document, or both.
+  d.eligibility = s('eligibility');
+  if (!d.eligibility && !(opts && opts.fileCount > 0)) {
+    errors.eligibility = 'Describe the eligibility and measurement rules, or attach a document.';
+  } else if (d.eligibility && d.eligibility.length < 20) {
+    errors.eligibility = 'Eligibility and measurement rules need more detail (at least 20 characters).';
+  }
   need('edge_cases', 'Edge cases ("what if X happens?")', 20);
 
   const tz = user.timezone || 'America/New_York';
@@ -338,33 +376,48 @@ function finalizeApproval(id, actor) {
   if (r.status !== 'approved' || r.approval_scope !== 'indefinite') return;
   const data = currentData(r);
   const terms = JSON.stringify(termsOf(data));
-  const hash = hashTerms(data);
+  const hash = hashTerms(data, attachmentsFor(r.id, r.current_version));
   let saved = r.saved_spif_id
     ? db.prepare('SELECT * FROM saved_spifs WHERE id = ?').get(r.saved_spif_id)
     : db.prepare('SELECT * FROM saved_spifs WHERE name = ?').get(r.name);
   if (saved) {
     db.prepare(
       `UPDATE saved_spifs SET terms_json = ?, terms_hash = ?, classification = ?, classification_reasoning = ?,
-       approved_indefinitely = 1, approved_by = ?, approved_at = datetime('now'), active = 1 WHERE id = ?`
-    ).run(terms, hash, r.classification, r.classification_reasoning, actor.id, saved.id);
+       approved_indefinitely = 1, approved_by = ?, approved_at = datetime('now'), active = 1,
+       source_request_id = ?, source_version = ? WHERE id = ?`
+    ).run(terms, hash, r.classification, r.classification_reasoning, actor.id, r.id, r.current_version, saved.id);
   } else {
     const info = db
       .prepare(
         `INSERT INTO saved_spifs (name, owner_id, type, terms_json, terms_hash, classification,
-         classification_reasoning, approved_indefinitely, approved_by, approved_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, datetime('now'))`
+         classification_reasoning, approved_indefinitely, approved_by, approved_at, source_request_id, source_version)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, datetime('now'), ?, ?)`
       )
-      .run(r.name, r.submitter_id, r.type, terms, hash, r.classification, r.classification_reasoning, actor.id);
+      .run(
+        r.name,
+        r.submitter_id,
+        r.type,
+        terms,
+        hash,
+        r.classification,
+        r.classification_reasoning,
+        actor.id,
+        r.id,
+        r.current_version
+      );
     saved = { id: info.lastInsertRowid };
   }
   db.prepare('UPDATE requests SET saved_spif_id = ? WHERE id = ?').run(saved.id, id);
   audit(actor, 'saved_spif.approved_indefinitely', 'saved_spif', saved.id, id, { name: r.name });
 }
 
-const createRequest = db.transaction((user, type, data, saved) => {
+// carried: attachment rows copied from a saved SPIF; uploaded: newly uploaded file records.
+const createRequest = db.transaction((user, type, data, saved, uploaded, carried) => {
   assertCanSubmit(user);
   if (!TYPES[type]) throw new UserError('Unknown request type.');
-  const hash = hashTerms(data);
+  const up = uploaded || [];
+  const carry = carried || [];
+  const hash = hashTerms(data, [...carry, ...up]);
 
   const info = db
     .prepare(
@@ -376,6 +429,7 @@ const createRequest = db.transaction((user, type, data, saved) => {
   db.prepare(
     'INSERT INTO request_versions (request_id, version, data_json, terms_hash, created_by) VALUES (?, 1, ?, ?, ?)'
   ).run(id, JSON.stringify(data), hash, user.id);
+  saveAttachments(user, id, 1, carry, up);
   audit(user, 'request.submitted', 'request', id, id, { type, name: data.name, version: 1 });
 
   // Terms unchanged from an indefinitely approved SPIF: finance and approver steps are covered.
@@ -394,7 +448,7 @@ const createRequest = db.transaction((user, type, data, saved) => {
   return id;
 });
 
-const resubmitRequest = db.transaction((user, id, data) => {
+const resubmitRequest = db.transaction((user, id, data, uploaded, carried) => {
   const r = getRequest(id);
   if (!r || r.submitter_id !== user.id) throw new UserError('Request not found.');
   if (r.status !== 'returned') throw new UserError('Only returned requests can be edited.');
@@ -402,7 +456,8 @@ const resubmitRequest = db.transaction((user, id, data) => {
   const version = r.current_version + 1;
   db.prepare(
     'INSERT INTO request_versions (request_id, version, data_json, terms_hash, created_by) VALUES (?, ?, ?, ?, ?)'
-  ).run(id, version, JSON.stringify(data), hashTerms(data), user.id);
+  ).run(id, version, JSON.stringify(data), hashTerms(data, [...(carried || []), ...(uploaded || [])]), user.id);
+  saveAttachments(user, id, version, carried || [], uploaded || []);
   db.prepare(
     `UPDATE requests SET current_version = ?, name = ?, status = 'finance_review', classification = NULL,
      classification_reasoning = NULL, approval_scope = NULL, updated_at = datetime('now') WHERE id = ?`
@@ -629,6 +684,7 @@ module.exports = {
   getRequest,
   getVersions,
   getSteps,
+  attachmentsFor,
   currentData,
   canView,
   listRequests,

@@ -87,6 +87,21 @@ CREATE TABLE IF NOT EXISTS approval_steps (
   decided_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS attachments (
+  id INTEGER PRIMARY KEY,
+  request_id INTEGER NOT NULL REFERENCES requests(id),
+  version INTEGER NOT NULL,
+  field TEXT NOT NULL,
+  original_name TEXT NOT NULL,
+  stored_name TEXT NOT NULL,
+  mime TEXT,
+  size INTEGER NOT NULL,
+  sha256 TEXT NOT NULL,
+  uploaded_by INTEGER NOT NULL REFERENCES users(id),
+  uploaded_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_attachments_request ON attachments(request_id, version);
+
 CREATE TABLE IF NOT EXISTS results (
   id INTEGER PRIMARY KEY,
   request_id INTEGER NOT NULL UNIQUE REFERENCES requests(id),
@@ -122,11 +137,26 @@ CREATE TRIGGER IF NOT EXISTS versions_no_update BEFORE UPDATE ON request_version
 BEGIN SELECT RAISE(ABORT, 'request_versions are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS versions_no_delete BEFORE DELETE ON request_versions
 BEGIN SELECT RAISE(ABORT, 'request_versions are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS attachments_no_update BEFORE UPDATE ON attachments
+BEGIN SELECT RAISE(ABORT, 'attachments are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS attachments_no_delete BEFORE DELETE ON attachments
+BEGIN SELECT RAISE(ABORT, 'attachments are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS steps_no_update BEFORE UPDATE ON approval_steps
 BEGIN SELECT RAISE(ABORT, 'approval_steps are append-only'); END;
 CREATE TRIGGER IF NOT EXISTS steps_no_delete BEFORE DELETE ON approval_steps
 BEGIN SELECT RAISE(ABORT, 'approval_steps are append-only'); END;
 `);
+
+// Add columns to tables that may already exist from an earlier deploy.
+function addColumnIfMissing(table, column, type) {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
+  if (!cols.includes(column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+}
+addColumnIfMissing('saved_spifs', 'source_request_id', 'INTEGER');
+addColumnIfMissing('saved_spifs', 'source_version', 'INTEGER');
+
+const uploadDir = path.join(dataDir, 'uploads');
+fs.mkdirSync(uploadDir, { recursive: true });
 
 function getSetting(key) {
   const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key);
@@ -171,4 +201,4 @@ function seedAdmin() {
   console.log(`Created first admin: ${ADMIN_EMAIL}`);
 }
 
-module.exports = { db, audit, getSetting, setSetting, seedAdmin, dataDir };
+module.exports = { db, audit, getSetting, setSetting, seedAdmin, dataDir, uploadDir };

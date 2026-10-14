@@ -96,6 +96,30 @@ function select(name, label, values, errors, options, o) {
   return fieldWrap(name, label, opt.hint, errors, inner);
 }
 
+function fileField(existing, keptIds, reattach) {
+  const ids = keptIds || [];
+  const kept = (existing || [])
+    .map(
+      (a) =>
+        `<label class="check"><input type="checkbox" name="keep_files" value="${a.id}"${
+          ids.includes(String(a.id)) ? ' checked' : ''
+        }> <a href="/attachments/${a.id}">${esc(a.original_name)}</a></label>`
+    )
+    .join('<br>');
+  return `<div class="field">
+    <label for="eligibility_files">Attach a document (optional)</label>
+    ${kept ? `<div class="hint">Already attached. Uncheck to remove.</div><div>${kept}</div>` : ''}
+    <input id="eligibility_files" name="eligibility_files" type="file" multiple accept=".pdf,.doc,.docx,.xls,.xlsx,.csv,.txt,.png,.jpg,.jpeg">
+    <div class="hint">${
+      reattach ? 'The form had errors, so please attach your file(s) again. ' : ''
+    }PDF, Word, Excel, CSV, text or image. Up to 5 files, 10 MB each. A document can replace typing the rules above.</div>
+  </div>`;
+}
+
+function attachmentLinks(files) {
+  return (files || []).map((a) => `<a href="/attachments/${a.id}">${esc(a.original_name)}</a>`).join('<br>');
+}
+
 function participantsFields(values, errors, label) {
   const group = values.participants_group || '';
   let picked = [].concat(values.participants_pods || []).map(String);
@@ -174,7 +198,7 @@ function requestChooser(ctx) {
 }
 
 function requestForm(ctx, o) {
-  const { type, values, errors, action, submitLabel, savedId, lockName, requestId } = o;
+  const { type, values, errors, action, submitLabel, savedId, lockName, requestId, existingFiles, keptIds, reattach } = o;
   const isAdj = type === 'adjustment';
   const hidden = `${csrfField(ctx)}<input type="hidden" name="type" value="${esc(type)}">${
     savedId ? `<input type="hidden" name="saved_id" value="${esc(savedId)}">` : ''
@@ -210,7 +234,8 @@ function requestForm(ctx, o) {
       ${input('announce_date', 'Date announced to the team', values, errors, { type: 'date' })}
       ${input('announce_method', 'How it will be announced', values, errors, { hint: 'e.g. email, all-hands, Slack' })}
     </div>
-    ${textarea('eligibility', 'Eligibility and measurement rules', values, errors, { hint: 'Who qualifies and exactly how results are measured.' })}
+    ${textarea('eligibility', 'Eligibility and measurement rules', values, errors, { hint: 'Who qualifies and exactly how results are measured. Type it here, attach a document below, or both.' })}
+    ${fileField(existingFiles, keptIds, reattach)}
     ${textarea('edge_cases', 'Edge cases', values, errors, {
       hint: 'Think of one-off cases that may require exceptions, and say how each would be handled.',
     })}`;
@@ -221,7 +246,7 @@ function requestForm(ctx, o) {
     `<a class="back" href="${requestId ? '/requests/' + requestId : '/request'}">&larr; Back</a>
     <h1>${requestId ? 'Edit and resubmit: ' : ''}${esc(TYPES[type])}</h1>
     ${errorList}
-    <form method="post" action="${esc(action)}" class="panel">
+    <form method="post" action="${esc(action)}" class="panel" enctype="multipart/form-data">
       ${hidden}
       ${common}
       ${isAdj ? adjFields : spifFields}
@@ -230,7 +255,7 @@ function requestForm(ctx, o) {
   );
 }
 
-function termsTable(data, type) {
+function termsTable(data, type, files) {
   const rows = [];
   const add = (label, val) => {
     if (val !== '' && val != null) rows.push(`<tr><th>${esc(label)}</th><td class="pre">${esc(val)}</td></tr>`);
@@ -252,6 +277,7 @@ function termsTable(data, type) {
     if (data.start_date) add('Run dates', `${data.start_date} to ${data.end_date}`);
     if (data.announce_date) add('Announced', `${data.announce_date} via ${data.announce_method}`);
     add('Eligibility and measurement', data.eligibility);
+    if (files && files.length) rows.push(`<tr><th>Attached documents</th><td>${attachmentLinks(files)}</td></tr>`);
     add('Edge cases', data.edge_cases);
   }
   return `<table class="kv">${rows.join('')}</table>`;
@@ -294,6 +320,8 @@ function requestList(ctx, rows, queue) {
 
 function requestDetail(ctx, o) {
   const { r, data, versions, steps, actions, auditRows, secondName, results } = o;
+  const attachments = o.attachments || [];
+  const filesFor = (version) => attachments.filter((a) => a.version === version);
   const tz = ctx.user.timezone;
   const isAdj = r.type === 'adjustment';
   const reasoningBox = (required) =>
@@ -379,7 +407,7 @@ function requestDetail(ctx, o) {
     .map(
       (v) => `<details${v.version === r.current_version ? ' open' : ''}>
       <summary>Version ${v.version}${v.version === r.current_version ? ' (current)' : ''}: ${esc(v.created_by_name)}, ${esc(fmtTs(v.created_at, tz))}</summary>
-      ${termsTable(v.data, r.type)}</details>`
+      ${termsTable(v.data, r.type, filesFor(v.version))}</details>`
     )
     .join('');
 
@@ -405,7 +433,7 @@ function requestDetail(ctx, o) {
     ${isAdj && data.quote_status === 'no_quote' ? '<div class="flash error">No quote on this deal. Under the adjustment guide it does not qualify.</div>' : ''}
     ${isAdj ? `<div class="flash info">${esc(ADJUSTMENT_GUIDE)}</div>` : ''}
     <h2>Current terms</h2>
-    ${termsTable(data, r.type)}
+    ${termsTable(data, r.type, filesFor(r.current_version))}
     ${forms.join('')}
     ${results ? `<h2>Results</h2><table class="kv"><tr><th>Actual spend</th><td>${esc(money(results.actual_spend))}</td></tr>
       <tr><th>Deals / demos</th><td>${esc(results.deals_count == null ? '' : results.deals_count)}</td></tr>

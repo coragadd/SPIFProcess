@@ -47,6 +47,8 @@ button.link { background: none; border: 0; color: #3558c8; cursor: pointer; font
 .field input, .field select, .field textarea {
   width: 100%; padding: 0.5rem 0.6rem; border: 1px solid #c9cdd6; border-radius: 6px; font: inherit; background: #fff;
 }
+.field input[type=checkbox] { width: auto; padding: 0; margin-right: 0.25rem; }
+.field input[type=file] { padding: 0.35rem; }
 .field input[readonly] { background: #eef0f4; }
 .field.has-error input, .field.has-error select, .field.has-error textarea { border-color: #c0392b; }
 .login {
