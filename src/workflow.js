@@ -47,7 +47,6 @@ const TERM_FIELDS = [
   'estimated_spend',
   'eligibility',
   'edge_cases',
-  'plan_language',
   'deal',
   'quote_status',
   'closed_by',
@@ -128,8 +127,6 @@ function validate(type, input, user, opts) {
   const spend = parseMoney(s('estimated_spend'));
   if (spend == null || spend < 0) errors.estimated_spend = 'Enter the estimated total spend as a number.';
   d.estimated_spend = spend == null ? '' : spend;
-
-  d.plan_language = s('plan_language');
 
   if (isAdj) {
     need('description', 'Description', 20);

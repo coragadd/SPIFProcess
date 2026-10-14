@@ -173,8 +173,7 @@ function requestForm(ctx, o) {
     ${select('adjustment_size', 'Adjustment size', values, errors, [['full', 'Full'], ['half', 'Half']])}
     ${textarea('adjustment_reason', 'Reason for the adjustment', values, errors)}
     ${input('amounts', 'Amount', values, errors, { hint: 'e.g. $450 commission adjustment' })}
-    ${input('estimated_spend', 'Estimated total spend ($)', values, errors, { type: 'number', step: '0.01' })}
-    ${input('plan_language', 'Commission plan language affected (optional)', values, errors)}`;
+    ${input('estimated_spend', 'Estimated total spend ($)', values, errors, { type: 'number', step: '0.01' })}`;
 
   const spifFields = `
     ${select('payout_structure', 'Payout structure', values, errors, Object.entries(PAYOUT_LABELS))}
@@ -191,8 +190,7 @@ function requestForm(ctx, o) {
     ${textarea('eligibility', 'Eligibility and measurement rules', values, errors, { hint: 'Who qualifies and exactly how results are measured.' })}
     ${textarea('edge_cases', 'Edge cases', values, errors, {
       hint: 'What if X happens? e.g. one component hits but the other does not: how is payout determined?',
-    })}
-    ${input('plan_language', 'Commission plan language affected (optional)', values, errors)}`;
+    })}`;
 
   return page(
     ctx,
@@ -233,7 +231,6 @@ function termsTable(data, type) {
     add('Eligibility and measurement', data.eligibility);
     add('Edge cases', data.edge_cases);
   }
-  add('Commission plan language', data.plan_language);
   return `<table class="kv">${rows.join('')}</table>`;
 }
 
