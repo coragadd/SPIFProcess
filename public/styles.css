@@ -49,6 +49,11 @@ button.link { background: none; border: 0; color: #3558c8; cursor: pointer; font
 }
 .field input[readonly] { background: #eef0f4; }
 .field.has-error input, .field.has-error select, .field.has-error textarea { border-color: #c0392b; }
+.login {
+  min-height: 75vh; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center;
+}
+.login .panel { width: 100%; max-width: 380px; text-align: left; }
+.login .flash { width: 100%; max-width: 380px; }
 [hidden] { display: none !important; }
 .field label.check { display: inline-block; font-weight: 400; margin: 0 1rem 0.25rem 0; }
 .checks { padding: 0.25rem 0; }

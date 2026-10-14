@@ -123,7 +123,8 @@ function login(ctx, error) {
   return page(
     ctx,
     'Sign in',
-    `<h1>SPIF Process</h1>
+    `<div class="login">
+    <h1>SPIF Process</h1>
     <p class="subtitle">Sign in to request, manage, and review incentives.</p>
     ${error ? `<div class="flash error">${esc(error)}</div>` : ''}
     <form method="post" action="/login" class="panel narrow">
@@ -131,7 +132,8 @@ function login(ctx, error) {
       <div class="field"><label for="email">Email</label><input id="email" name="email" type="email" autocomplete="username" required></div>
       <div class="field"><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password" required></div>
       <button class="btn">Sign in</button>
-    </form>`
+    </form>
+    </div>`
   );
 }
 
