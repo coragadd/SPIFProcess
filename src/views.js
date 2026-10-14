@@ -98,7 +98,8 @@ function select(name, label, values, errors, options, o) {
 
 function participantsFields(values, errors, label) {
   const group = values.participants_group || '';
-  const picked = [].concat(values.participants_pods || []).map(String);
+  let picked = [].concat(values.participants_pods || []).map(String);
+  if (picked.includes('All PODs')) picked = PODS;
   const boxes = PODS.map(
     (p) =>
       `<label class="check"><input type="checkbox" name="participants_pods" value="${esc(p)}"${

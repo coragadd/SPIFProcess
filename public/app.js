@@ -45,17 +45,26 @@
         group.addEventListener('change', syncGroup);
         syncGroup();
 
-        // "All PODs" and the individual PODs are mutually exclusive.
+        // "All PODs" selects every colour; clearing any colour clears "All PODs".
         var boxes = form.querySelectorAll('[name=participants_pods]');
+        var allBox = null;
+        var colours = [];
         for (var j = 0; j < boxes.length; j++) {
-          boxes[j].addEventListener('change', function (e) {
-            var changed = e.target;
-            if (!changed.checked) return;
-            for (var k = 0; k < boxes.length; k++) {
-              if (boxes[k] === changed) continue;
-              if (changed.value === 'All PODs' || boxes[k].value === 'All PODs') boxes[k].checked = false;
-            }
-          });
+          if (boxes[j].value === 'All PODs') allBox = boxes[j];
+          else colours.push(boxes[j]);
+        }
+        var onChange = function (e) {
+          var changed = e.target;
+          if (changed === allBox) {
+            for (var k = 0; k < colours.length; k++) colours[k].checked = allBox.checked;
+          } else {
+            var every = true;
+            for (var m = 0; m < colours.length; m++) if (!colours[m].checked) every = false;
+            allBox.checked = every;
+          }
+        };
+        if (allBox) {
+          for (var n = 0; n < boxes.length; n++) boxes[n].addEventListener('change', onChange);
         }
       }
     })(forms[i]);
