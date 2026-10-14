@@ -41,6 +41,9 @@ const TIMEZONES = [
 // Fields that define "how it works". Changing any of these voids an indefinite approval.
 const TERM_FIELDS = [
   'participants',
+  'participants_group',
+  'participants_pods',
+  'participants_individual',
   'description',
   'payout_structure',
   'amounts',
@@ -54,7 +57,19 @@ const TERM_FIELDS = [
   'adjustment_size',
 ];
 
-const DATE_FIELDS = ['start_date', 'end_date', 'announce_date', 'announce_method'];
+const GROUPS = [
+  'AEs',
+  'Expansion AEs',
+  'oBDRs',
+  'iBDRs',
+  'amBDRs',
+  'Merchant Services',
+  'Customer Care',
+  'Individual',
+];
+const PODS = ['All PODs', 'Red', 'Blue', 'Green', 'Black'];
+
+const DATE_FIELDS =['start_date', 'end_date', 'announce_date', 'announce_method'];
 
 function termsOf(data) {
   const o = {};
@@ -121,7 +136,25 @@ function validate(type, input, user, opts) {
     }
   }
 
-  need('participants', isAdj ? 'Person or team receiving the adjustment' : 'People or team involved');
+  // Who it applies to: a team (AEs also need a POD selection) or one named individual.
+  d.participants_group = s('participants_group');
+  d.participants_pods = [];
+  d.participants_individual = '';
+  if (!GROUPS.includes(d.participants_group)) {
+    errors.participants_group = 'Choose who this applies to.';
+  } else if (d.participants_group === 'AEs') {
+    const picked = [].concat(input.participants_pods || []).map(String);
+    d.participants_pods = picked.includes('All PODs') ? ['All PODs'] : PODS.filter((p) => picked.includes(p));
+    if (!d.participants_pods.length) errors.participants_pods = 'Select All PODs or at least one POD.';
+  } else if (d.participants_group === 'Individual') {
+    d.participants_individual = s('participants_individual');
+    if (!d.participants_individual) errors.participants_individual = 'Enter the individual\'s name.';
+  }
+  d.participants =
+    d.participants_group === 'Individual'
+      ? 'Individual: ' + d.participants_individual
+      : d.participants_group + (d.participants_pods.length ? ' (' + d.participants_pods.join(', ') + ')' : '');
+
   need('amounts', 'Amounts');
 
   const spend = parseMoney(s('estimated_spend'));
@@ -146,7 +179,7 @@ function validate(type, input, user, opts) {
 
   need('description', 'Description of how it works', 50);
   d.payout_structure = s('payout_structure');
-  if (!['per_transaction', 'flat'].includes(d.payout_structure)) errors.payout_structure = 'Choose a payout structure.';
+  if (!['flat_rate', 'calculated'].includes(d.payout_structure)) errors.payout_structure = 'Choose a payout structure.';
   need('eligibility', 'Eligibility and measurement rules', 20);
   need('edge_cases', 'Edge cases ("what if X happens?")', 20);
 
@@ -164,6 +197,9 @@ function validate(type, input, user, opts) {
 
   if (!validDate(d.end_date)) errors.end_date = 'An end date is required. No perpetual SPIFs.';
   else if (validDate(d.start_date) && d.end_date < d.start_date) errors.end_date = 'End date cannot be before the start date.';
+  else if (validDate(d.start_date) && d.end_date.slice(0, 7) !== d.start_date.slice(0, 7)) {
+    errors.end_date = 'End date must be in the same month as the start date. Resubmit for the next month.';
+  }
 
   if (!validDate(d.announce_date)) errors.announce_date = 'Enter the date it will be announced.';
 
@@ -583,6 +619,8 @@ module.exports = {
   STATUS_LABELS,
   PENDING,
   TIMEZONES,
+  GROUPS,
+  PODS,
   TERM_FIELDS,
   termsOf,
   isValidTz,

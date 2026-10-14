@@ -49,6 +49,10 @@ button.link { background: none; border: 0; color: #3558c8; cursor: pointer; font
 }
 .field input[readonly] { background: #eef0f4; }
 .field.has-error input, .field.has-error select, .field.has-error textarea { border-color: #c0392b; }
+[hidden] { display: none !important; }
+.field label.check { display: inline-block; font-weight: 400; margin: 0 1rem 0.25rem 0; }
+.checks { padding: 0.25rem 0; }
+.hint { margin-top: 0.25rem; }
 .err { color: #c0392b; font-size: 0.9rem; margin-top: 0.25rem; }
 .row { display: flex; gap: 1rem; flex-wrap: wrap; }
 .row .field { min-width: 200px; }

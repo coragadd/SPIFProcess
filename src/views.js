@@ -1,5 +1,5 @@
 'use strict';
-const { TYPES, STATUS_LABELS, TIMEZONES, displayStatus } = require('./workflow');
+const { TYPES, STATUS_LABELS, TIMEZONES, GROUPS, PODS, displayStatus } = require('./workflow');
 
 const esc = (s) =>
   String(s == null ? '' : s)
@@ -26,7 +26,7 @@ function fmtTs(ts, tz) {
 }
 
 const ROLE_LABELS = { submitter: 'Submitter', finance: 'Finance', approver: 'Approver', admin: 'Admin' };
-const PAYOUT_LABELS = { per_transaction: 'Per transaction (per demo, per deal)', flat: 'Flat bonus' };
+const PAYOUT_LABELS = { flat_rate: 'Flat Rate', calculated: 'Calculated Amount' };
 const QUOTE_LABELS = { signed: 'Signed', in_process: 'In process', no_quote: 'No quote' };
 
 const ADJUSTMENT_GUIDE =
@@ -57,7 +57,7 @@ function page(ctx, title, body) {
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>${esc(title)} | SPIF Process</title>
 <link rel="stylesheet" href="/static/styles.css">
-</head><body>${nav}<main class="container">${flash}${body}</main></body></html>`;
+</head><body>${nav}<main class="container">${flash}${body}</main><script src="/static/app.js"></script></body></html>`;
 }
 
 // ------------------------------------------------------------ form helpers
@@ -65,8 +65,8 @@ function page(ctx, title, body) {
 function fieldWrap(name, label, hint, errors, inner) {
   return `<div class="field${errors[name] ? ' has-error' : ''}">
     <label for="${name}">${esc(label)}</label>
-    ${hint ? `<div class="hint">${esc(hint)}</div>` : ''}
     ${inner}
+    ${hint ? `<div class="hint">${esc(hint)}</div>` : ''}
     ${errors[name] ? `<div class="err">${esc(errors[name])}</div>` : ''}
   </div>`;
 }
@@ -94,6 +94,26 @@ function select(name, label, values, errors, options, o) {
       .join('')}
   </select>`;
   return fieldWrap(name, label, opt.hint, errors, inner);
+}
+
+function participantsFields(values, errors, label) {
+  const group = values.participants_group || '';
+  const picked = [].concat(values.participants_pods || []).map(String);
+  const boxes = PODS.map(
+    (p) =>
+      `<label class="check"><input type="checkbox" name="participants_pods" value="${esc(p)}"${
+        picked.includes(p) ? ' checked' : ''
+      }> ${esc(p)}</label>`
+  ).join('');
+  return `${select('participants_group', label, values, errors, GROUPS.map((g) => [g, g]))}
+    <div class="field${errors.participants_pods ? ' has-error' : ''}" id="pods-wrap"${group === 'AEs' ? '' : ' hidden'}>
+      <label>POD (select one or more)</label>
+      <div class="checks">${boxes}</div>
+      ${errors.participants_pods ? `<div class="err">${esc(errors.participants_pods)}</div>` : ''}
+    </div>
+    <div id="individual-wrap"${group === 'Individual' ? '' : ' hidden'}>
+      ${input('participants_individual', "Individual's name", values, errors)}
+    </div>`;
 }
 
 // ------------------------------------------------------------ pages
@@ -162,7 +182,7 @@ function requestForm(ctx, o) {
 
   const common = `
     ${input('name', 'Name', values, errors, { readonly: lockName, hint: lockName ? 'Saved recurring SPIF name.' : 'Must be distinct from every other request.' })}
-    ${input('participants', isAdj ? 'Person or team receiving the adjustment' : 'People or team involved', values, errors)}
+    ${participantsFields(values, errors, isAdj ? 'Person or team receiving the adjustment' : 'People or team involved')}
     ${textarea('description', isAdj ? 'Description' : 'Detailed description of how it works', values, errors, { rows: 6 })}`;
 
   const adjFields = `
@@ -177,11 +197,11 @@ function requestForm(ctx, o) {
 
   const spifFields = `
     ${select('payout_structure', 'Payout structure', values, errors, Object.entries(PAYOUT_LABELS))}
-    ${textarea('amounts', 'Amounts', values, errors, { hint: 'What is paid, per transaction or as a flat amount. Include tiers if any.' })}
+    ${textarea('amounts', 'Amounts', values, errors, { hint: 'What is paid, flat rate or calculation method. Include tiers if any.' })}
     ${input('estimated_spend', 'Estimated total spend ($)', values, errors, { type: 'number', step: '0.01' })}
     <div class="row">
       ${input('start_date', 'Start date', values, errors, { type: 'date' })}
-      ${input('end_date', 'End date', values, errors, { type: 'date', hint: 'Required. Resubmit monthly; no perpetual SPIFs.' })}
+      ${input('end_date', 'End date', values, errors, { type: 'date', hint: 'Required. Must be in the same month as the start date.' })}
     </div>
     <div class="row">
       ${input('announce_date', 'Date announced to the team', values, errors, { type: 'date' })}
@@ -189,7 +209,7 @@ function requestForm(ctx, o) {
     </div>
     ${textarea('eligibility', 'Eligibility and measurement rules', values, errors, { hint: 'Who qualifies and exactly how results are measured.' })}
     ${textarea('edge_cases', 'Edge cases', values, errors, {
-      hint: 'What if X happens? e.g. one component hits but the other does not: how is payout determined?',
+      hint: 'Think of one-off cases that may require exceptions, and say how each would be handled.',
     })}`;
 
   return page(
