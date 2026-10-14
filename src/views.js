@@ -30,7 +30,7 @@ const PAYOUT_LABELS = { flat_rate: 'Flat Rate', calculated: 'Calculated Amount' 
 const QUOTE_LABELS = { signed: 'Signed', in_process: 'In process', no_quote: 'No quote' };
 
 const ADJUSTMENT_GUIDE =
-  'Adjustment guide: deals with a signed or in-process quote can receive a full or half adjustment. Deals with no quote do not qualify. Adjustments are treated as expenses by default.';
+  'Adjustment guide: adjustments are treated as expenses by default.';
 
 function csrfField(ctx) {
   return `<input type="hidden" name="_csrf" value="${esc(ctx.csrf)}">`;
@@ -430,7 +430,6 @@ function requestDetail(ctx, o) {
     ${r.classification ? `Finance: <strong>${esc(r.classification)}</strong>. ` : ''}
     ${r.approval_scope ? `Approver scope: <strong>${esc(r.approval_scope === 'once' ? 'approved once' : 'approved indefinitely')}</strong>.` : ''}
     ${r.status === 'second_signoff' && secondName ? `Second sign-off by ${esc(secondName)}.` : ''}</p>
-    ${isAdj && data.quote_status === 'no_quote' ? '<div class="flash error">No quote on this deal. Under the adjustment guide it does not qualify.</div>' : ''}
     ${isAdj ? `<div class="flash info">${esc(ADJUSTMENT_GUIDE)}</div>` : ''}
     <h2>Current terms</h2>
     ${termsTable(data, r.type, filesFor(r.current_version))}
