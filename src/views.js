@@ -27,7 +27,6 @@ function fmtTs(ts, tz) {
 
 const ROLE_LABELS = { submitter: 'Submitter', finance: 'Finance', approver: 'Approver', admin: 'Admin' };
 const PAYOUT_LABELS = { flat_rate: 'Flat Rate', calculated: 'Calculated Amount' };
-const QUOTE_LABELS = { signed: 'Signed', in_process: 'In process', no_quote: 'No quote' };
 
 const ADJUSTMENT_GUIDE =
   'Adjustment guide: adjustments are treated as expenses by default.';
@@ -192,7 +191,7 @@ function requestChooser(ctx) {
       <a class="card" href="/requests/new?type=new_spif"><h2>New SPIF</h2><p>A SPIF that has not run before.</p></a>
       <a class="card" href="/saved"><h2>Recurring SPIF</h2><p>Pick a saved SPIF and resubmit it with new dates.</p></a>
       <a class="card" href="/requests/new?type=bonus"><h2>Bonus</h2><p>A flat or per-transaction bonus.</p></a>
-      <a class="card" href="/requests/new?type=adjustment"><h2>Adjustment</h2><p>A commission adjustment on a deal.</p></a>
+      <a class="card" href="/requests/new?type=adjustment"><h2>Adjustment</h2><p>A commission adjustment, on a deal, a component, or neither.</p></a>
     </nav>`
   );
 }
@@ -214,9 +213,7 @@ function requestForm(ctx, o) {
 
   const adjFields = `
     <div class="flash info">${esc(ADJUSTMENT_GUIDE)}</div>
-    ${input('deal', 'Deal', values, errors)}
-    ${select('quote_status', 'Quote status', values, errors, Object.entries(QUOTE_LABELS))}
-    ${input('closed_by', 'Who closed the deal', values, errors)}
+    ${input('deal', 'Deal or component (optional)', values, errors, { hint: 'Leave blank if the adjustment is not tied to a specific deal or component.' })}
     ${select('adjustment_size', 'Adjustment size', values, errors, [['full', 'Full'], ['half', 'Half']])}
     ${textarea('adjustment_reason', 'Reason for the adjustment', values, errors)}
     ${input('amounts', 'Amount', values, errors, { hint: 'e.g. $450 commission adjustment' })}
@@ -263,9 +260,7 @@ function termsTable(data, type, files) {
   add('Participants', data.participants);
   add('Description', data.description);
   if (type === 'adjustment') {
-    add('Deal', data.deal);
-    add('Quote status', QUOTE_LABELS[data.quote_status] || data.quote_status);
-    add('Closed by', data.closed_by);
+    add('Deal or component', data.deal);
     add('Adjustment size', data.adjustment_size);
     add('Reason', data.adjustment_reason);
   } else {

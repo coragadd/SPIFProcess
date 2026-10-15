@@ -51,8 +51,6 @@ const TERM_FIELDS = [
   'eligibility',
   'edge_cases',
   'deal',
-  'quote_status',
-  'closed_by',
   'adjustment_reason',
   'adjustment_size',
 ];
@@ -195,11 +193,9 @@ function validate(type, input, user, opts) {
 
   if (isAdj) {
     need('description', 'Description', 20);
-    need('deal', 'Deal');
-    need('closed_by', 'Who closed the deal');
+    // Adjustments may relate to a deal, a component, or nothing at all.
+    d.deal = s('deal');
     need('adjustment_reason', 'Reason for the adjustment', 20);
-    d.quote_status = s('quote_status');
-    if (!['signed', 'in_process', 'no_quote'].includes(d.quote_status)) errors.quote_status = 'Choose the quote status.';
     d.adjustment_size = s('adjustment_size');
     if (!['full', 'half'].includes(d.adjustment_size)) errors.adjustment_size = 'Choose full or half.';
     d.payout_structure = '';
