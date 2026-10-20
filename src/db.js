@@ -155,6 +155,13 @@ function addColumnIfMissing(table, column, type) {
 addColumnIfMissing('saved_spifs', 'source_request_id', 'INTEGER');
 addColumnIfMissing('saved_spifs', 'source_version', 'INTEGER');
 
+// Tiers: 1 and 2 can both request and approve (tier 1 needs only finance, tier 2 needs a tier 1
+// approver); tier 3 can only request (needs a tier 1 or 2 approver). Everyone defaults to tier 3.
+addColumnIfMissing('users', 'tier', 'INTEGER NOT NULL DEFAULT 3');
+// The old 'approver' role became tier 1. The CHECK constraint still allows the value, so move
+// those users to the plain 'submitter' role.
+db.exec(`UPDATE users SET tier = 1, role = 'submitter' WHERE role = 'approver'`);
+
 const uploadDir = path.join(dataDir, 'uploads');
 fs.mkdirSync(uploadDir, { recursive: true });
 

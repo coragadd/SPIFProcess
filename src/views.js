@@ -25,7 +25,12 @@ function fmtTs(ts, tz) {
   }
 }
 
-const ROLE_LABELS = { submitter: 'Submitter', finance: 'Finance', approver: 'Approver', admin: 'Admin' };
+const ROLE_LABELS = { submitter: 'Standard', finance: 'Finance', admin: 'Admin' };
+const TIER_LABELS = {
+  1: 'Tier 1 (requests and approves)',
+  2: 'Tier 2 (requests and approves)',
+  3: 'Tier 3 (requests only)',
+};
 const PAYOUT_LABELS = { flat_rate: 'Flat Rate', calculated: 'Calculated Amount' };
 
 const ADJUSTMENT_GUIDE =
@@ -43,7 +48,7 @@ function page(ctx, title, body) {
         <a href="/request">Request</a>
         <a href="/requests">Manage</a>
         <a href="/reports">Reports</a>
-        ${u.role !== 'submitter' ? '<a href="/audit">Audit log</a>' : ''}
+        ${u.role !== 'submitter' || u.tier <= 2 ? '<a href="/audit">Audit log</a>' : ''}
         ${u.role === 'admin' ? '<a href="/admin">Admin</a>' : ''}
         <span class="spacer"></span>
         <a href="/account">${esc(u.name)} (${esc(ROLE_LABELS[u.role])})</a>
@@ -300,7 +305,7 @@ function requestList(ctx, rows, queue) {
         )
         .join('')}</tbody></table>`
       : '<p class="muted">Nothing here yet.</p>';
-  const mineOnly = ctx.user.role === 'submitter';
+  const mineOnly = ctx.user.role === 'submitter' && ctx.user.tier === 3;
   return page(
     ctx,
     'Manage',
@@ -314,7 +319,7 @@ function requestList(ctx, rows, queue) {
 }
 
 function requestDetail(ctx, o) {
-  const { r, data, versions, steps, actions, auditRows, secondName, results } = o;
+  const { r, data, versions, steps, actions, auditRows, results } = o;
   const attachments = o.attachments || [];
   const filesFor = (version) => attachments.filter((a) => a.version === version);
   const tz = ctx.user.timezone;
@@ -334,7 +339,16 @@ function requestDetail(ctx, o) {
           <option value="expense"${isAdj ? ' selected' : ''}>Expense</option>
         </select></div>
       ${reasoningBox(true)}
-      <button class="btn" name="action" value="classify">Classify and send to approver</button>
+      ${
+        r.approval_scope
+          ? ''
+          : `<div class="field"><label>Approval scope</label>
+        <select name="scope">
+          <option value="once">Approve once</option>
+          ${isAdj ? '' : '<option value="indefinite">Approve indefinitely (saves as a recurring SPIF)</option>'}
+        </select></div>`
+      }
+      <button class="btn" name="action" value="classify">Classify and approve</button>
       <button class="btn secondary" name="action" value="return">Return to submitter</button>
       <button class="btn danger" name="action" value="reject">Reject</button>
     </form>`);
@@ -343,23 +357,18 @@ function requestDetail(ctx, o) {
     forms.push(`<form method="post" action="/requests/${r.id}/approver" class="panel">${csrfField(ctx)}
       <h3>Approver decision</h3>
       ${isAdj ? `<div class="flash info">${esc(ADJUSTMENT_GUIDE)}</div>` : ''}
-      <p>Finance classification: <strong>${esc(r.classification || 'not classified')}</strong>.
-      ${r.submitter_role === 'approver' ? 'This is an approver submission, so a second sign-off is also required.' : ''}</p>
+      <div class="field"><label>Does finance need to approve this?</label>
+        <select name="needs_finance" required>
+          <option value="">Select...</option>
+          <option value="yes">Yes, send it to finance after my approval</option>
+          <option value="no">No, my approval completes it</option>
+        </select></div>
       ${reasoningBox(false)}
       <button class="btn" name="action" value="approve_once">Approve once</button>
       ${isAdj ? '' : '<button class="btn" name="action" value="approve_indefinitely">Approve indefinitely</button>'}
       <button class="btn secondary" name="action" value="return">Return to submitter</button>
       <button class="btn danger" name="action" value="reject">Reject</button>
-      ${isAdj ? '' : '<p class="hint">Indefinite approval saves this as a recurring SPIF. Monthly resubmissions with unchanged terms skip finance and approver review; any change to the terms brings back full review.</p>'}
-    </form>`);
-  }
-  if (actions.second) {
-    forms.push(`<form method="post" action="/requests/${r.id}/second" class="panel">${csrfField(ctx)}
-      <h3>Second sign-off</h3>
-      ${reasoningBox(false)}
-      <button class="btn" name="action" value="approve">Sign off</button>
-      <button class="btn secondary" name="action" value="return">Return to submitter</button>
-      <button class="btn danger" name="action" value="reject">Reject</button>
+      ${isAdj ? '' : '<p class="hint">Indefinite approval saves this as a recurring SPIF. Monthly resubmissions with unchanged terms skip review; any change to the terms brings back full review.</p>'}
     </form>`);
   }
   if (actions.skip) {
@@ -423,8 +432,7 @@ function requestDetail(ctx, o) {
     <h1>${esc(r.name)} ${statusBadge(r, data, tz)}</h1>
     <p class="subtitle">${esc(TYPES[r.type])} #${r.id}, submitted by ${esc(r.submitter_name)}.
     ${r.classification ? `Finance: <strong>${esc(r.classification)}</strong>. ` : ''}
-    ${r.approval_scope ? `Approver scope: <strong>${esc(r.approval_scope === 'once' ? 'approved once' : 'approved indefinitely')}</strong>.` : ''}
-    ${r.status === 'second_signoff' && secondName ? `Second sign-off by ${esc(secondName)}.` : ''}</p>
+    ${r.approval_scope ? `Approver scope: <strong>${esc(r.approval_scope === 'once' ? 'approved once' : 'approved indefinitely')}</strong>.` : ''}</p>
     ${isAdj ? `<div class="flash info">${esc(ADJUSTMENT_GUIDE)}</div>` : ''}
     <h2>Current terms</h2>
     ${termsTable(data, r.type, filesFor(r.current_version))}
@@ -504,7 +512,7 @@ function reports(ctx, data, year, years) {
     </form>
     <p class="subtitle">Approved and finalized requests only. "Spend used" is the actual spend once results are in, otherwise the estimate.
     Requests count in the month they start (adjustments: the month submitted).
-    ${ctx.user.role === 'submitter' ? 'You see your own requests only.' : ''}</p>
+    ${ctx.user.role === 'submitter' && ctx.user.tier === 3 ? 'You see your own requests only.' : ''}</p>
     <h2>Total for ${year}: ${esc(money(data.total))}</h2>
     <h2>By month</h2>
     ${
@@ -556,6 +564,12 @@ function tzOptions(current) {
   return TIMEZONES.map((z) => `<option${z === current ? ' selected' : ''}>${esc(z)}</option>`).join('');
 }
 
+function tierOptions(current) {
+  return Object.entries(TIER_LABELS)
+    .map(([v, l]) => `<option value="${v}"${Number(v) === current ? ' selected' : ''}>${esc(l)}</option>`)
+    .join('');
+}
+
 function roleOptions(current) {
   return Object.entries(ROLE_LABELS)
     .map(([v, l]) => `<option value="${v}"${v === current ? ' selected' : ''}>${esc(l)}</option>`)
@@ -563,28 +577,13 @@ function roleOptions(current) {
 }
 
 function admin(ctx, o) {
-  const { users, secondId, pendingRows, saved } = o;
+  const { users, pendingRows, saved } = o;
   const tz = ctx.user.timezone;
   return page(
     ctx,
     'Admin',
     `<a class="back" href="/">&larr; Home</a>
     <h1>Admin</h1>
-
-    <h2>Settings</h2>
-    <form method="post" action="/admin/settings" class="panel narrow">
-      ${csrfField(ctx)}
-      <div class="field"><label>Second sign-off for approver submissions</label>
-        <div class="hint">Required when an approver (e.g. Peter) submits a request.</div>
-        <select name="second_signoff_user_id">
-          <option value="">Not set</option>
-          ${users
-            .filter((u) => u.active)
-            .map((u) => `<option value="${u.id}"${u.id === secondId ? ' selected' : ''}>${esc(u.name)} (${esc(ROLE_LABELS[u.role])})</option>`)
-            .join('')}
-        </select></div>
-      <button class="btn">Save settings</button>
-    </form>
 
     <h2>Pending approvals (${pendingRows.length})</h2>
     ${
@@ -609,6 +608,7 @@ function admin(ctx, o) {
       </div>
       <div class="row">
         <div class="field"><label>Role</label><select name="role">${roleOptions(u.role)}</select></div>
+        <div class="field"><label>Tier</label><select name="tier">${tierOptions(u.tier)}</select></div>
         <div class="field"><label>Time zone</label><select name="timezone">${tzOptions(u.timezone)}</select></div>
         <div class="field"><label>Status</label><select name="active"><option value="1"${u.active ? ' selected' : ''}>Active</option><option value="0"${u.active ? '' : ' selected'}>Inactive</option></select></div>
       </div>
@@ -627,6 +627,7 @@ function admin(ctx, o) {
       </div>
       <div class="row">
         <div class="field"><label>Role</label><select name="role">${roleOptions('submitter')}</select></div>
+        <div class="field"><label>Tier</label><select name="tier">${tierOptions(3)}</select></div>
         <div class="field"><label>Time zone</label><select name="timezone">${tzOptions('America/New_York')}</select></div>
         <div class="field"><label>Temporary password (min 10 characters)</label><input name="password" type="password" autocomplete="new-password" required></div>
       </div>
@@ -634,7 +635,7 @@ function admin(ctx, o) {
     </form>
 
     <h2>Saved recurring SPIFs (${saved.length})</h2>
-    <p><a href="/saved">Manage saved SPIFs</a></p>`
+    <p><a href="/saved">Manage saved SPIFs</a> &middot; <a href="/admin/saved-spifs.csv">Export all saved SPIFs (CSV)</a></p>`
   );
 }
 
@@ -647,7 +648,7 @@ function account(ctx) {
     <h1>Your account</h1>
     <form method="post" action="/account" class="panel narrow">
       ${csrfField(ctx)}
-      <p>${esc(u.name)}, ${esc(u.email)}, ${esc(ROLE_LABELS[u.role])}</p>
+      <p>${esc(u.name)}, ${esc(u.email)}, ${esc(ROLE_LABELS[u.role])}, ${esc(TIER_LABELS[u.tier])}</p>
       <div class="field"><label>Time zone</label><div class="hint">Dates and the "must be after today" rule use this.</div>
         <select name="timezone">${tzOptions(u.timezone)}</select></div>
       <div class="field"><label>New password (leave blank to keep, min 10 characters)</label><input name="password" type="password" autocomplete="new-password"></div>

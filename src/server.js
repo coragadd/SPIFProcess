@@ -7,9 +7,10 @@ const cookieSession = require('cookie-session');
 const bcrypt = require('bcryptjs');
 const multer = require('multer');
 
-const { db, audit, getSetting, setSetting, seedAdmin, dataDir, uploadDir } = require('./db');
+const { db, audit, seedAdmin, dataDir, uploadDir } = require('./db');
 const wf = require('./workflow');
 const views = require('./views');
+const { notifyFinance } = require('./notify');
 
 const { UserError } = wf;
 
@@ -200,7 +201,7 @@ function tooManyAttempts(key) {
 
 function savedFor(user, id) {
   const s = db.prepare('SELECT * FROM saved_spifs WHERE id = ? AND active = 1').get(Number(id));
-  const privileged = ['admin', 'finance', 'approver'].includes(user.role);
+  const privileged = ['admin', 'finance'].includes(user.role) || wf.isApprover(user);
   if (!s || (!privileged && s.owner_id !== user.id)) throw new UserError('Saved SPIF not found.');
   return s;
 }
@@ -352,6 +353,7 @@ app.post(
         );
       }
       const id = wf.createRequest(req.user, type, data, saved, uploaded, kept);
+      notifyFinance(req, id);
       flash(req, 'success', 'Request submitted.');
       res.redirect('/requests/' + id);
     } catch (e) {
@@ -384,8 +386,6 @@ app.get(
     const r = loadVisible(req, res);
     if (!r) return;
     const data = wf.currentData(r);
-    const secondId = wf.secondSignoffUserId();
-    const second = secondId ? db.prepare('SELECT name FROM users WHERE id = ?').get(secondId) : null;
     res.send(
       views.requestDetail(ctx(req), {
         r,
@@ -395,7 +395,6 @@ app.get(
         steps: wf.getSteps(r.id),
         actions: wf.availableActions(req.user, r, data),
         auditRows: db.prepare('SELECT * FROM audit_log WHERE request_id = ? ORDER BY id').all(r.id),
-        secondName: second ? second.name : null,
         results: db.prepare('SELECT * FROM results WHERE request_id = ?').get(r.id),
       })
     );
@@ -459,6 +458,7 @@ app.post(
         );
       }
       wf.resubmitRequest(req.user, r.id, data, uploaded, kept);
+      notifyFinance(req, r.id);
       flash(req, 'success', 'Resubmitted for approval.');
       res.redirect('/requests/' + r.id);
     } catch (e) {
@@ -488,6 +488,8 @@ const actionRoute = (name, fn, okMsg) =>
       const r = loadVisible(req, res);
       if (!r) return;
       fn(req.user, r.id, req.body);
+      // An approver may have just sent it on to finance.
+      if (name === 'approver') notifyFinance(req, r.id);
       flash(req, 'success', okMsg);
       res.redirect('/requests/' + r.id);
     })
@@ -495,7 +497,6 @@ const actionRoute = (name, fn, okMsg) =>
 
 actionRoute('finance', wf.financeDecide, 'Finance decision recorded.');
 actionRoute('approver', wf.approverDecide, 'Approver decision recorded.');
-actionRoute('second', wf.secondDecide, 'Second sign-off decision recorded.');
 actionRoute('skip', wf.adminSkip, 'Step skipped and logged.');
 actionRoute('cancel', wf.cancelRequest, 'Request cancelled.');
 actionRoute('results', wf.submitResults, 'Results submitted. The request is finalized.');
@@ -505,7 +506,7 @@ actionRoute('results', wf.submitResults, 'Results submitted. The request is fina
 app.get(
   '/saved',
   wrap((req, res) => {
-    const privileged = ['admin', 'finance', 'approver'].includes(req.user.role);
+    const privileged = ['admin', 'finance'].includes(req.user.role) || wf.isApprover(req.user);
     const rows = privileged
       ? db.prepare('SELECT * FROM saved_spifs WHERE active = 1 ORDER BY name').all()
       : db.prepare('SELECT * FROM saved_spifs WHERE active = 1 AND owner_id = ? ORDER BY name').all(req.user.id);
@@ -528,12 +529,13 @@ app.post(
     if (Object.keys(errors).length) throw new UserError(Object.values(errors).join(' '));
     const id = wf.createRequest(req.user, 'recurring_spif', data, s, [], carried);
     const row = wf.getRequest(id);
+    notifyFinance(req, id);
     flash(
       req,
       'success',
-      row.status === 'finance_review'
-        ? 'Resubmitted. It goes through full review because it was not unchanged from an indefinite approval.'
-        : 'Resubmitted. Terms are unchanged from the indefinite approval, so finance and approver steps were skipped.'
+      row.status === 'approved'
+        ? 'Resubmitted. Terms are unchanged from the indefinite approval, so approval steps were skipped.'
+        : 'Resubmitted. It goes through full review because it was not unchanged from an indefinite approval.'
     );
     res.redirect('/requests/' + id);
   })
@@ -569,7 +571,8 @@ app.get(
 
 app.get(
   '/audit',
-  requireRole('admin', 'finance', 'approver'),
+  (req, res, next) =>
+    ['admin', 'finance'].includes(req.user.role) || wf.isApprover(req.user) ? next() : res.status(403).send('Not allowed.'),
   wrap((req, res) => {
     const reqId = parseInt(req.query.request, 10);
     const rows = reqId
@@ -581,7 +584,7 @@ app.get(
 
 // ---------------------------------------------------------------- admin
 
-const ROLES = ['submitter', 'finance', 'approver', 'admin'];
+const ROLES = ['submitter', 'finance', 'admin'];
 
 app.get(
   '/admin',
@@ -590,7 +593,6 @@ app.get(
     res.send(
       views.admin(ctx(req), {
         users: db.prepare('SELECT * FROM users ORDER BY active DESC, name').all(),
-        secondId: wf.secondSignoffUserId(),
         pendingRows: wf.listRequests(req.user).filter((r) => wf.PENDING.includes(r.status)),
         saved: db.prepare('SELECT id FROM saved_spifs WHERE active = 1').all(),
       })
@@ -598,18 +600,91 @@ app.get(
   })
 );
 
+// Quote a CSV cell; a leading = + - @ is prefixed so spreadsheets do not run it as a formula.
+function csvCell(v) {
+  let s = v == null ? '' : String(v);
+  if (/^[=+\-@\t\r]/.test(s)) s = "'" + s;
+  return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+
+app.get(
+  '/admin/saved-spifs.csv',
+  requireRole('admin'),
+  wrap((req, res) => {
+    const rows = db
+      .prepare(
+        `SELECT s.*, o.name AS owner_name, o.email AS owner_email, a.name AS approved_by_name
+         FROM saved_spifs s
+         JOIN users o ON o.id = s.owner_id
+         LEFT JOIN users a ON a.id = s.approved_by
+         ORDER BY s.name`
+      )
+      .all();
+    const header = [
+      'ID',
+      'Name',
+      'Type',
+      'Owner',
+      'Owner email',
+      'Active',
+      'Approved indefinitely',
+      'Approved by',
+      'Approved at',
+      'Classification',
+      'Classification reasoning',
+      'Source request',
+      'Source version',
+      'Created at',
+      ...wf.TERM_FIELDS,
+    ];
+    const lines = [header.map(csvCell).join(',')];
+    for (const s of rows) {
+      const terms = JSON.parse(s.terms_json);
+      lines.push(
+        [
+          s.id,
+          s.name,
+          s.type,
+          s.owner_name,
+          s.owner_email,
+          s.active ? 'Yes' : 'No',
+          s.approved_indefinitely ? 'Yes' : 'No',
+          s.approved_by_name,
+          s.approved_at,
+          s.classification,
+          s.classification_reasoning,
+          s.source_request_id,
+          s.source_version,
+          s.created_at,
+          ...wf.TERM_FIELDS.map((k) => (Array.isArray(terms[k]) ? terms[k].join('; ') : terms[k])),
+        ]
+          .map(csvCell)
+          .join(',')
+      );
+    }
+    audit(req.user, 'saved_spif.exported', 'saved_spif', null, null, { count: rows.length });
+    res.set({
+      'Content-Type': 'text/csv; charset=utf-8',
+      'Content-Disposition': `attachment; filename="saved-spifs-${new Date().toISOString().slice(0, 10)}.csv"`,
+    });
+    res.send('﻿' + lines.join('\r\n') + '\r\n');
+  })
+);
+
 function cleanUserInput(body) {
   const name = String(body.name || '').trim();
   const email = String(body.email || '').trim().toLowerCase();
   const role = String(body.role || '');
+  const tier = Number(body.tier);
   const timezone = String(body.timezone || '');
   const password = String(body.password || '');
   if (!name) throw new UserError('Name is required.');
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new UserError('Enter a valid email address.');
   if (!ROLES.includes(role)) throw new UserError('Choose a valid role.');
+  if (![1, 2, 3].includes(tier)) throw new UserError('Choose a tier.');
   if (!wf.isValidTz(timezone)) throw new UserError('Choose a valid time zone.');
   if (password && password.length < 10) throw new UserError('Passwords need at least 10 characters.');
-  return { name, email, role, timezone, password };
+  return { name, email, role, tier, timezone, password };
 }
 
 function constraintToUserError(e) {
@@ -625,9 +700,9 @@ app.post(
     if (!u.password) throw new UserError('A temporary password is required.');
     try {
       const info = db
-        .prepare('INSERT INTO users (name, email, password_hash, role, timezone) VALUES (?, ?, ?, ?, ?)')
-        .run(u.name, u.email, bcrypt.hashSync(u.password, 10), u.role, u.timezone);
-      audit(req.user, 'user.created', 'user', info.lastInsertRowid, null, { email: u.email, role: u.role });
+        .prepare('INSERT INTO users (name, email, password_hash, role, tier, timezone) VALUES (?, ?, ?, ?, ?, ?)')
+        .run(u.name, u.email, bcrypt.hashSync(u.password, 10), u.role, u.tier, u.timezone);
+      audit(req.user, 'user.created', 'user', info.lastInsertRowid, null, { email: u.email, role: u.role, tier: u.tier });
     } catch (e) {
       throw constraintToUserError(e);
     }
@@ -649,10 +724,11 @@ app.post(
       throw new UserError('You cannot deactivate or demote yourself.');
     }
     try {
-      db.prepare('UPDATE users SET name = ?, email = ?, role = ?, timezone = ?, active = ? WHERE id = ?').run(
+      db.prepare('UPDATE users SET name = ?, email = ?, role = ?, tier = ?, timezone = ?, active = ? WHERE id = ?').run(
         u.name,
         u.email,
         u.role,
+        u.tier,
         u.timezone,
         active,
         id
@@ -662,28 +738,11 @@ app.post(
       throw constraintToUserError(e);
     }
     audit(req.user, 'user.updated', 'user', id, null, {
-      before: { name: before.name, email: before.email, role: before.role, active: before.active, timezone: before.timezone },
-      after: { name: u.name, email: u.email, role: u.role, active, timezone: u.timezone },
+      before: { name: before.name, email: before.email, role: before.role, tier: before.tier, active: before.active, timezone: before.timezone },
+      after: { name: u.name, email: u.email, role: u.role, tier: u.tier, active, timezone: u.timezone },
       passwordChanged: !!u.password,
     });
     flash(req, 'success', `Saved ${u.name}.`);
-    res.redirect('/admin');
-  })
-);
-
-app.post(
-  '/admin/settings',
-  requireRole('admin'),
-  wrap((req, res) => {
-    const v = String(req.body.second_signoff_user_id || '');
-    if (v) {
-      const u = db.prepare('SELECT id FROM users WHERE id = ? AND active = 1').get(Number(v));
-      if (!u) throw new UserError('Choose an active user.');
-    }
-    const prev = getSetting('second_signoff_user_id');
-    setSetting('second_signoff_user_id', v);
-    audit(req.user, 'settings.updated', 'setting', null, null, { second_signoff_user_id: { from: prev, to: v || null } });
-    flash(req, 'success', 'Settings saved.');
     res.redirect('/admin');
   })
 );

@@ -1,6 +1,6 @@
 'use strict';
 const crypto = require('crypto');
-const { db, audit, getSetting } = require('./db');
+const { db, audit } = require('./db');
 
 class UserError extends Error {}
 
@@ -14,7 +14,7 @@ const TYPES = {
 const STATUS_LABELS = {
   finance_review: 'Awaiting finance',
   approver_review: 'Awaiting approver',
-  second_signoff: 'Awaiting second sign-off',
+  second_signoff: 'Awaiting second sign-off (retired step; an admin can skip it)',
   returned: 'Returned to submitter',
   approved: 'Approved',
   rejected: 'Rejected',
@@ -134,9 +134,19 @@ function parseMoney(v) {
   return isNaN(n) ? null : n;
 }
 
-function secondSignoffUserId() {
-  const v = getSetting('second_signoff_user_id');
-  return v ? Number(v) : null;
+// Tiers 1 and 2 can approve; a user can approve only requests from a strictly higher tier number
+// (tier 1 approves tier 2 and 3, tier 2 approves tier 3). Tier 3 cannot approve.
+function isApprover(user) {
+  return user.tier <= 2;
+}
+
+function canApprove(user, submitterTier) {
+  return isApprover(user) && user.tier < submitterTier;
+}
+
+// Tier 1 requests need only finance; everyone else starts with an approver.
+function firstStatus(submitterTier) {
+  return submitterTier === 1 ? 'finance_review' : 'approver_review';
 }
 
 // ---------------------------------------------------------------- validation
@@ -212,10 +222,8 @@ function validate(type, input, user, opts) {
   d.eligibility = s('eligibility');
   if (!d.eligibility && !(opts && opts.fileCount > 0)) {
     errors.eligibility = 'Describe the eligibility and measurement rules, or attach a document.';
-  } else if (d.eligibility && d.eligibility.length < 20) {
-    errors.eligibility = 'Eligibility and measurement rules need more detail (at least 20 characters).';
   }
-  need('edge_cases', 'Edge cases ("what if X happens?")', 20);
+  need('edge_cases', 'Edge cases ("what if X happens?")');
 
   const tz = user.timezone || 'America/New_York';
   const today = todayIn(tz);
@@ -245,7 +253,7 @@ function validate(type, input, user, opts) {
 function getRequest(id) {
   return db
     .prepare(
-      `SELECT r.*, u.name AS submitter_name, u.role AS submitter_role
+      `SELECT r.*, u.name AS submitter_name, u.role AS submitter_role, u.tier AS submitter_tier
        FROM requests r JOIN users u ON u.id = r.submitter_id WHERE r.id = ?`
     )
     .get(id);
@@ -278,22 +286,15 @@ function currentData(r) {
 }
 
 function canView(user, r) {
-  if (['admin', 'finance', 'approver'].includes(user.role)) return true;
+  if (['admin', 'finance'].includes(user.role)) return true;
   if (r.submitter_id === user.id) return true;
-  if (user.id === secondSignoffUserId()) {
-    if (r.status === 'second_signoff') return true;
-    const decided = db
-      .prepare('SELECT 1 FROM approval_steps WHERE request_id = ? AND decided_by = ? LIMIT 1')
-      .get(r.id, user.id);
-    return !!decided;
-  }
-  return false;
+  return canApprove(user, r.submitter_tier);
 }
 
 function listRequests(user) {
   const rows = db
     .prepare(
-      `SELECT r.*, u.name AS submitter_name, v.data_json
+      `SELECT r.*, u.name AS submitter_name, u.tier AS submitter_tier, v.data_json
        FROM requests r
        JOIN users u ON u.id = r.submitter_id
        JOIN request_versions v ON v.request_id = r.id AND v.version = r.current_version
@@ -304,12 +305,10 @@ function listRequests(user) {
 }
 
 function queueFor(user, rows) {
-  const second = secondSignoffUserId();
   return rows.filter(
     (r) =>
       (r.status === 'finance_review' && ['finance', 'admin'].includes(user.role) && r.submitter_id !== user.id) ||
-      (r.status === 'approver_review' && user.role === 'approver') ||
-      (r.status === 'second_signoff' && user.id === second && r.submitter_id !== user.id)
+      (r.status === 'approver_review' && canApprove(user, r.submitter_tier))
   );
 }
 
@@ -319,8 +318,7 @@ function availableActions(user, r, data) {
   const today = todayIn(user.timezone || 'America/New_York');
   return {
     finance: r.status === 'finance_review' && ['finance', 'admin'].includes(user.role) && !self,
-    approver: r.status === 'approver_review' && user.role === 'approver',
-    second: r.status === 'second_signoff' && user.id === secondSignoffUserId() && !self,
+    approver: r.status === 'approver_review' && canApprove(user, r.submitter_tier),
     skip: pending && user.role === 'admin' && !self,
     cancel: (pending || r.status === 'returned') && (self || user.role === 'admin'),
     edit: r.status === 'returned' && self,
@@ -352,18 +350,6 @@ function setStatus(id, status, extra) {
      classification_reasoning = COALESCE(?, classification_reasoning),
      approval_scope = COALESCE(?, approval_scope), updated_at = datetime('now') WHERE id = ?`
   ).run(status, e.classification || null, e.reasoning || null, e.scope || null, id);
-}
-
-function nextAfterApprover(submitterRole) {
-  return submitterRole === 'approver' ? 'second_signoff' : 'approved';
-}
-
-function assertCanSubmit(user) {
-  if (user.role === 'approver' && !secondSignoffUserId()) {
-    throw new UserError(
-      'Your submissions need a second sign-off, but no second sign-off person is configured. Ask an admin to set one in Admin > Settings.'
-    );
-  }
 }
 
 // An indefinite approval turns the request's terms into a saved recurring SPIF.
@@ -409,7 +395,6 @@ function finalizeApproval(id, actor) {
 
 // carried: attachment rows copied from a saved SPIF; uploaded: newly uploaded file records.
 const createRequest = db.transaction((user, type, data, saved, uploaded, carried) => {
-  assertCanSubmit(user);
   if (!TYPES[type]) throw new UserError('Unknown request type.');
   const up = uploaded || [];
   const carry = carried || [];
@@ -418,9 +403,9 @@ const createRequest = db.transaction((user, type, data, saved, uploaded, carried
   const info = db
     .prepare(
       `INSERT INTO requests (type, name, submitter_id, status, saved_spif_id)
-       VALUES (?, ?, ?, 'finance_review', ?)`
+       VALUES (?, ?, ?, ?, ?)`
     )
-    .run(type, data.name, user.id, saved ? saved.id : null);
+    .run(type, data.name, user.id, firstStatus(user.tier), saved ? saved.id : null);
   const id = Number(info.lastInsertRowid);
   db.prepare(
     'INSERT INTO request_versions (request_id, version, data_json, terms_hash, created_by) VALUES (?, 1, ?, ?, ?)'
@@ -433,13 +418,12 @@ const createRequest = db.transaction((user, type, data, saved, uploaded, carried
     const note = `Terms unchanged from indefinitely approved saved SPIF #${saved.id}`;
     addStep(id, 1, 'finance', 'skipped', note, 'inherited classification: ' + (saved.classification || 'none'), null);
     addStep(id, 1, 'approver', 'skipped', note, 'indefinite approval', null);
-    const next = nextAfterApprover(user.role);
-    setStatus(id, next, {
+    setStatus(id, 'approved', {
       classification: saved.classification,
       reasoning: saved.classification_reasoning,
       scope: 'indefinite',
     });
-    audit(null, 'request.auto_approved_steps', 'request', id, id, { savedSpifId: saved.id, status: next });
+    audit(null, 'request.auto_approved_steps', 'request', id, id, { savedSpifId: saved.id, status: 'approved' });
   }
   return id;
 });
@@ -448,16 +432,15 @@ const resubmitRequest = db.transaction((user, id, data, uploaded, carried) => {
   const r = getRequest(id);
   if (!r || r.submitter_id !== user.id) throw new UserError('Request not found.');
   if (r.status !== 'returned') throw new UserError('Only returned requests can be edited.');
-  assertCanSubmit(user);
   const version = r.current_version + 1;
   db.prepare(
     'INSERT INTO request_versions (request_id, version, data_json, terms_hash, created_by) VALUES (?, ?, ?, ?, ?)'
   ).run(id, version, JSON.stringify(data), hashTerms(data, [...(carried || []), ...(uploaded || [])]), user.id);
   saveAttachments(user, id, version, carried || [], uploaded || []);
   db.prepare(
-    `UPDATE requests SET current_version = ?, name = ?, status = 'finance_review', classification = NULL,
+    `UPDATE requests SET current_version = ?, name = ?, status = ?, classification = NULL,
      classification_reasoning = NULL, approval_scope = NULL, updated_at = datetime('now') WHERE id = ?`
-  ).run(version, data.name, id);
+  ).run(version, data.name, firstStatus(user.tier), id);
   audit(user, 'request.resubmitted', 'request', id, id, { version });
 });
 
@@ -473,9 +456,18 @@ const financeDecide = db.transaction((user, id, input) => {
   if (action === 'classify') {
     if (!['capitalizable', 'expense'].includes(input.classification)) throw new UserError('Choose capitalizable or expense.');
     if (reasoning.length < 10) throw new UserError('Finance reasoning is required (at least 10 characters).');
+    // An approver may already have chosen the scope; otherwise (tier 1 requests) finance does.
+    let scope = r.approval_scope;
+    if (!scope) {
+      scope = input.scope === 'indefinite' ? 'indefinite' : 'once';
+      if (scope === 'indefinite' && r.type === 'adjustment') {
+        throw new UserError('Adjustments cannot be approved indefinitely.');
+      }
+    }
     addStep(id, r.current_version, 'finance', 'approved', reasoning, input.classification, user.id);
-    setStatus(id, 'approver_review', { classification: input.classification, reasoning });
-    audit(user, 'finance.classified', 'request', id, id, { classification: input.classification, reasoning });
+    setStatus(id, 'approved', { classification: input.classification, reasoning, scope });
+    audit(user, 'finance.classified', 'request', id, id, { classification: input.classification, reasoning, scope });
+    finalizeApproval(id, user);
   } else if (action === 'return' || action === 'reject') {
     if (reasoning.length < 10) throw new UserError('A reason is required (at least 10 characters).');
     const decision = action === 'return' ? 'returned' : 'rejected';
@@ -491,7 +483,9 @@ const approverDecide = db.transaction((user, id, input) => {
   const r = getRequest(id);
   if (!r) throw new UserError('Request not found.');
   if (r.status !== 'approver_review') throw new UserError('This request is not awaiting the approver.');
-  if (user.role !== 'approver') throw new UserError('Only an approver can decide this step.');
+  if (!canApprove(user, r.submitter_tier)) {
+    throw new UserError('You cannot approve requests from this submitter.');
+  }
   const reasoning = String(input.reasoning || '').trim();
   const action = input.action;
 
@@ -499,12 +493,12 @@ const approverDecide = db.transaction((user, id, input) => {
     if (action === 'approve_indefinitely' && r.type === 'adjustment') {
       throw new UserError('Adjustments cannot be approved indefinitely.');
     }
-    const next = nextAfterApprover(r.submitter_role);
-    if (next === 'second_signoff' && !secondSignoffUserId()) {
-      throw new UserError('This request needs a second sign-off but none is configured. Ask an admin to set one.');
+    if (!['yes', 'no'].includes(input.needs_finance)) {
+      throw new UserError('Say whether finance needs to approve this request.');
     }
+    const next = input.needs_finance === 'yes' ? 'finance_review' : 'approved';
     const scope = action === 'approve_once' ? 'once' : 'indefinite';
-    addStep(id, r.current_version, 'approver', 'approved', reasoning, scope, user.id);
+    addStep(id, r.current_version, 'approver', 'approved', reasoning, `${scope}; finance review ${next === 'approved' ? 'not ' : ''}needed`, user.id);
     setStatus(id, next, { scope });
     audit(user, 'approver.approved', 'request', id, id, { scope, reasoning, next });
     finalizeApproval(id, user);
@@ -514,30 +508,6 @@ const approverDecide = db.transaction((user, id, input) => {
     addStep(id, r.current_version, 'approver', decision, reasoning, null, user.id);
     setStatus(id, action === 'return' ? 'returned' : 'rejected');
     audit(user, 'approver.' + decision, 'request', id, id, { reasoning });
-  } else {
-    throw new UserError('Unknown action.');
-  }
-});
-
-const secondDecide = db.transaction((user, id, input) => {
-  const r = getRequest(id);
-  if (!r) throw new UserError('Request not found.');
-  if (r.status !== 'second_signoff') throw new UserError('This request is not awaiting second sign-off.');
-  if (user.id !== secondSignoffUserId()) throw new UserError('You are not the designated second sign-off.');
-  if (r.submitter_id === user.id) throw new UserError('You cannot sign off on your own request.');
-  const reasoning = String(input.reasoning || '').trim();
-
-  if (input.action === 'approve') {
-    addStep(id, r.current_version, 'second_signoff', 'approved', reasoning, null, user.id);
-    setStatus(id, 'approved');
-    audit(user, 'second_signoff.approved', 'request', id, id, { reasoning });
-    finalizeApproval(id, user);
-  } else if (input.action === 'return' || input.action === 'reject') {
-    if (reasoning.length < 10) throw new UserError('A reason is required (at least 10 characters).');
-    const decision = input.action === 'return' ? 'returned' : 'rejected';
-    addStep(id, r.current_version, 'second_signoff', decision, reasoning, null, user.id);
-    setStatus(id, input.action === 'return' ? 'returned' : 'rejected');
-    audit(user, 'second_signoff.' + decision, 'request', id, id, { reasoning });
   } else {
     throw new UserError('Unknown action.');
   }
@@ -554,13 +524,8 @@ const adminSkip = db.transaction((user, id, input) => {
   if (reasoning.length < 10) throw new UserError('A reason for the override is required (at least 10 characters).');
 
   const stepName = { finance_review: 'finance', approver_review: 'approver', second_signoff: 'second_signoff' }[r.status];
-  let next;
-  if (r.status === 'finance_review') next = 'approver_review';
-  else if (r.status === 'approver_review') next = nextAfterApprover(r.submitter_role);
-  else next = 'approved';
-  if (next === 'second_signoff' && !secondSignoffUserId()) {
-    throw new UserError('The next step is a second sign-off, but none is configured.');
-  }
+  // Skipping the approver still leaves finance to review; skipping finance completes the request.
+  const next = r.status === 'approver_review' ? 'finance_review' : 'approved';
   addStep(id, r.current_version, stepName, 'skipped', reasoning, 'admin override', user.id);
   setStatus(id, next);
   audit(user, 'admin.skipped_step', 'request', id, id, { step: stepName, reasoning, next });
@@ -607,7 +572,7 @@ const submitResults = db.transaction((user, id, input) => {
 function reportData(user, year) {
   const rows = db
     .prepare(
-      `SELECT r.id, r.type, r.name, r.status, r.created_at, r.submitter_id, u.name AS submitter_name,
+      `SELECT r.id, r.type, r.name, r.status, r.created_at, r.submitter_id, u.name AS submitter_name, u.tier AS submitter_tier,
               v.data_json, res.actual_spend
        FROM requests r
        JOIN users u ON u.id = r.submitter_id
@@ -687,12 +652,11 @@ module.exports = {
   queueFor,
   availableActions,
   displayStatus,
-  secondSignoffUserId,
+  isApprover,
   createRequest,
   resubmitRequest,
   financeDecide,
   approverDecide,
-  secondDecide,
   adminSkip,
   cancelRequest,
   submitResults,
