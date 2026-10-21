@@ -2,7 +2,7 @@
 
 Strict, auditable request and approval process for SPIFs, bonuses, and adjustments.
 
-Flow: submitter requests -> finance classifies (capitalizable or expense) -> approver (Peter) approves once or indefinitely -> second sign-off when the approver is the submitter. Every action is written to an append-only audit log.
+Flow: submitter requests -> finance classifies (capitalizable or expense; finance can return a request but not reject it) -> a higher-tier approver approves once or indefinitely and can also reject. Tier 1 submitters have no approver, so finance's step completes their requests. Every action is written to an append-only audit log.
 
 ## Stack
 

@@ -340,29 +340,22 @@ function requestDetail(ctx, o) {
         </select></div>
       ${reasoningBox(true)}
       ${
-        r.approval_scope
-          ? ''
+        r.submitter_tier !== 1
+          ? '<p class="hint">After you classify this, it goes to an approver.</p>'
           : `<div class="field"><label>Approval scope</label>
         <select name="scope">
           <option value="once">Approve once</option>
           ${isAdj ? '' : '<option value="indefinite">Approve indefinitely (saves as a recurring SPIF)</option>'}
         </select></div>`
       }
-      <button class="btn" name="action" value="classify">Classify and approve</button>
+      <button class="btn" name="action" value="classify">${r.submitter_tier === 1 ? 'Classify and approve' : 'Classify and send to approver'}</button>
       <button class="btn secondary" name="action" value="return">Return to submitter</button>
-      <button class="btn danger" name="action" value="reject">Reject</button>
     </form>`);
   }
   if (actions.approver) {
     forms.push(`<form method="post" action="/requests/${r.id}/approver" class="panel">${csrfField(ctx)}
       <h3>Approver decision</h3>
       ${isAdj ? `<div class="flash info">${esc(ADJUSTMENT_GUIDE)}</div>` : ''}
-      <div class="field"><label>Does finance need to approve this?</label>
-        <select name="needs_finance" required>
-          <option value="">Select...</option>
-          <option value="yes">Yes, send it to finance after my approval</option>
-          <option value="no">No, my approval completes it</option>
-        </select></div>
       ${reasoningBox(false)}
       <button class="btn" name="action" value="approve_once">Approve once</button>
       ${isAdj ? '' : '<button class="btn" name="action" value="approve_indefinitely">Approve indefinitely</button>'}

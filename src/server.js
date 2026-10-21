@@ -488,8 +488,6 @@ const actionRoute = (name, fn, okMsg) =>
       const r = loadVisible(req, res);
       if (!r) return;
       fn(req.user, r.id, req.body);
-      // An approver may have just sent it on to finance.
-      if (name === 'approver') notifyFinance(req, r.id);
       flash(req, 'success', okMsg);
       res.redirect('/requests/' + r.id);
     })

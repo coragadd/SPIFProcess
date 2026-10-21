@@ -144,9 +144,10 @@ function canApprove(user, submitterTier) {
   return isApprover(user) && user.tier < submitterTier;
 }
 
-// Tier 1 requests need only finance; everyone else starts with an approver.
-function firstStatus(submitterTier) {
-  return submitterTier === 1 ? 'finance_review' : 'approver_review';
+// Every request goes to finance first. Tier 1 submitters have no higher-tier approver, so for
+// them finance's classification is the final step; everyone else then goes to an approver.
+function afterFinance(submitterTier) {
+  return submitterTier === 1 ? 'approved' : 'approver_review';
 }
 
 // ---------------------------------------------------------------- validation
@@ -405,7 +406,7 @@ const createRequest = db.transaction((user, type, data, saved, uploaded, carried
       `INSERT INTO requests (type, name, submitter_id, status, saved_spif_id)
        VALUES (?, ?, ?, ?, ?)`
     )
-    .run(type, data.name, user.id, firstStatus(user.tier), saved ? saved.id : null);
+    .run(type, data.name, user.id, 'finance_review', saved ? saved.id : null);
   const id = Number(info.lastInsertRowid);
   db.prepare(
     'INSERT INTO request_versions (request_id, version, data_json, terms_hash, created_by) VALUES (?, 1, ?, ?, ?)'
@@ -440,7 +441,7 @@ const resubmitRequest = db.transaction((user, id, data, uploaded, carried) => {
   db.prepare(
     `UPDATE requests SET current_version = ?, name = ?, status = ?, classification = NULL,
      classification_reasoning = NULL, approval_scope = NULL, updated_at = datetime('now') WHERE id = ?`
-  ).run(version, data.name, firstStatus(user.tier), id);
+  ).run(version, data.name, 'finance_review', id);
   audit(user, 'request.resubmitted', 'request', id, id, { version });
 });
 
@@ -456,24 +457,25 @@ const financeDecide = db.transaction((user, id, input) => {
   if (action === 'classify') {
     if (!['capitalizable', 'expense'].includes(input.classification)) throw new UserError('Choose capitalizable or expense.');
     if (reasoning.length < 10) throw new UserError('Finance reasoning is required (at least 10 characters).');
-    // An approver may already have chosen the scope; otherwise (tier 1 requests) finance does.
-    let scope = r.approval_scope;
-    if (!scope) {
+    const next = afterFinance(r.submitter_tier);
+    // Tier 1 requests end here, so finance also picks the scope; otherwise the approver does.
+    let scope = null;
+    if (next === 'approved') {
       scope = input.scope === 'indefinite' ? 'indefinite' : 'once';
       if (scope === 'indefinite' && r.type === 'adjustment') {
         throw new UserError('Adjustments cannot be approved indefinitely.');
       }
     }
     addStep(id, r.current_version, 'finance', 'approved', reasoning, input.classification, user.id);
-    setStatus(id, 'approved', { classification: input.classification, reasoning, scope });
-    audit(user, 'finance.classified', 'request', id, id, { classification: input.classification, reasoning, scope });
+    setStatus(id, next, { classification: input.classification, reasoning, scope });
+    audit(user, 'finance.classified', 'request', id, id, { classification: input.classification, reasoning, scope, next });
     finalizeApproval(id, user);
-  } else if (action === 'return' || action === 'reject') {
+  } else if (action === 'return') {
+    // Finance cannot reject; it can only send a request back for changes.
     if (reasoning.length < 10) throw new UserError('A reason is required (at least 10 characters).');
-    const decision = action === 'return' ? 'returned' : 'rejected';
-    addStep(id, r.current_version, 'finance', decision, reasoning, null, user.id);
-    setStatus(id, action === 'return' ? 'returned' : 'rejected');
-    audit(user, 'finance.' + decision, 'request', id, id, { reasoning });
+    addStep(id, r.current_version, 'finance', 'returned', reasoning, null, user.id);
+    setStatus(id, 'returned');
+    audit(user, 'finance.returned', 'request', id, id, { reasoning });
   } else {
     throw new UserError('Unknown action.');
   }
@@ -493,14 +495,10 @@ const approverDecide = db.transaction((user, id, input) => {
     if (action === 'approve_indefinitely' && r.type === 'adjustment') {
       throw new UserError('Adjustments cannot be approved indefinitely.');
     }
-    if (!['yes', 'no'].includes(input.needs_finance)) {
-      throw new UserError('Say whether finance needs to approve this request.');
-    }
-    const next = input.needs_finance === 'yes' ? 'finance_review' : 'approved';
     const scope = action === 'approve_once' ? 'once' : 'indefinite';
-    addStep(id, r.current_version, 'approver', 'approved', reasoning, `${scope}; finance review ${next === 'approved' ? 'not ' : ''}needed`, user.id);
-    setStatus(id, next, { scope });
-    audit(user, 'approver.approved', 'request', id, id, { scope, reasoning, next });
+    addStep(id, r.current_version, 'approver', 'approved', reasoning, scope, user.id);
+    setStatus(id, 'approved', { scope });
+    audit(user, 'approver.approved', 'request', id, id, { scope, reasoning });
     finalizeApproval(id, user);
   } else if (action === 'return' || action === 'reject') {
     if (reasoning.length < 10) throw new UserError('A reason is required (at least 10 characters).');
@@ -524,8 +522,8 @@ const adminSkip = db.transaction((user, id, input) => {
   if (reasoning.length < 10) throw new UserError('A reason for the override is required (at least 10 characters).');
 
   const stepName = { finance_review: 'finance', approver_review: 'approver', second_signoff: 'second_signoff' }[r.status];
-  // Skipping the approver still leaves finance to review; skipping finance completes the request.
-  const next = r.status === 'approver_review' ? 'finance_review' : 'approved';
+  // Skipping finance moves a request on to its approver (tier 1 has none); skipping the approver completes it.
+  const next = r.status === 'finance_review' ? afterFinance(r.submitter_tier) : 'approved';
   addStep(id, r.current_version, stepName, 'skipped', reasoning, 'admin override', user.id);
   setStatus(id, next);
   audit(user, 'admin.skipped_step', 'request', id, id, { step: stepName, reasoning, next });
