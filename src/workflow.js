@@ -336,6 +336,10 @@ function canEditRepAmounts(user, r) {
   return user.role === 'admin' || r.submitter_id === user.id;
 }
 
+function getReps() {
+  return db.prepare('SELECT * FROM reps WHERE active = 1 ORDER BY pod, name').all();
+}
+
 function getRepAmounts(requestId) {
   return db.prepare('SELECT * FROM rep_amounts WHERE request_id = ? ORDER BY id').all(requestId);
 }
@@ -354,19 +358,27 @@ const saveRepAmounts = db.transaction((user, requestId, input) => {
   const names = [].concat(input.rep_name || []).map((v) => String(v).trim());
   const amounts = [].concat(input.rep_amount || []).map((v) => String(v).trim());
   const notes = [].concat(input.rep_note || []).map((v) => String(v).trim());
+  const saved = getRepAmounts(requestId);
+  // Names must come from the rep list. A name already on this request is kept even if that rep is
+  // no longer on the list (entered before the list existed, or since deactivated).
+  const known = new Map();
+  for (const x of saved) known.set(x.rep_name.toLowerCase(), x.rep_name);
+  for (const x of getReps()) known.set(x.name.toLowerCase(), x.name);
   const rows = [];
   const seen = new Set();
   for (let i = 0; i < names.length; i++) {
     if (!names[i] && !amounts[i] && !notes[i]) continue; // blank spare row
-    if (!names[i]) throw new UserError(`Row ${i + 1}: enter the rep's name.`);
-    const amount = parseMoney(amounts[i]);
-    if (amount == null || amount < 0) throw new UserError(`${names[i]}: enter the amount as a number, 0 or more.`);
+    if (!names[i]) throw new UserError(`Row ${i + 1}: choose a rep.`);
     const key = names[i].toLowerCase();
-    if (seen.has(key)) throw new UserError(`${names[i]} is listed more than once.`);
+    if (!known.has(key)) throw new UserError(`${names[i]} is not on the rep list. Choose a rep from the dropdown.`);
+    const name = known.get(key);
+    const amount = parseMoney(amounts[i]);
+    if (amount == null || amount < 0) throw new UserError(`${name}: enter the amount as a number, 0 or more.`);
+    if (seen.has(key)) throw new UserError(`${name} is listed more than once.`);
     seen.add(key);
-    rows.push({ rep_name: names[i], amount, note: notes[i] || null });
+    rows.push({ rep_name: name, amount, note: notes[i] || null });
   }
-  const before = getRepAmounts(requestId).map((x) => ({ rep: x.rep_name, amount: x.amount, note: x.note }));
+  const before = saved.map((x) => ({ rep: x.rep_name, amount: x.amount, note: x.note }));
   const after = rows.map((x) => ({ rep: x.rep_name, amount: x.amount, note: x.note }));
   if (JSON.stringify(before) === JSON.stringify(after)) return false;
   db.prepare('DELETE FROM rep_amounts WHERE request_id = ?').run(requestId);
@@ -699,6 +711,7 @@ module.exports = {
   queueFor,
   availableActions,
   canEditRepAmounts,
+  getReps,
   getRepAmounts,
   repAmountTotals,
   saveRepAmounts,

@@ -125,6 +125,16 @@ CREATE TABLE IF NOT EXISTS rep_amounts (
 );
 CREATE INDEX IF NOT EXISTS idx_rep_amounts_request ON rep_amounts(request_id);
 
+-- The people who can receive amounts. Seeded from src/reps.json (see scripts/export-reps.ps1).
+CREATE TABLE IF NOT EXISTS reps (
+  id INTEGER PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+  role TEXT,
+  pod TEXT,
+  unit TEXT,
+  active INTEGER NOT NULL DEFAULT 1
+);
+
 CREATE TABLE IF NOT EXISTS audit_log (
   id INTEGER PRIMARY KEY,
   ts TEXT NOT NULL DEFAULT (datetime('now')),
@@ -174,6 +184,19 @@ addColumnIfMissing('users', 'tier', 'INTEGER NOT NULL DEFAULT 3');
 // The old 'approver' role became tier 1. The CHECK constraint still allows the value, so move
 // those users to the plain 'submitter' role.
 db.exec(`UPDATE users SET tier = 1, role = 'submitter' WHERE role = 'approver'`);
+
+// Add any reps from reps.json that are not in the table yet. Existing rows are left alone, so a
+// rep an admin deactivated stays deactivated.
+function seedReps() {
+  const file = path.join(__dirname, 'reps.json');
+  if (!fs.existsSync(file)) return;
+  const list = JSON.parse(fs.readFileSync(file, 'utf8'));
+  const ins = db.prepare('INSERT OR IGNORE INTO reps (name, role, pod, unit) VALUES (?, ?, ?, ?)');
+  db.transaction(() => {
+    for (const r of list) ins.run(r.name, r.role || null, r.pod || null, r.unit || null);
+  })();
+}
+seedReps();
 
 const uploadDir = path.join(dataDir, 'uploads');
 fs.mkdirSync(uploadDir, { recursive: true });

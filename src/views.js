@@ -323,16 +323,28 @@ function requestList(ctx, rows, queue, repTotals) {
 function requestDetail(ctx, o) {
   const { r, data, versions, steps, actions, auditRows, results } = o;
   const repAmounts = o.repAmounts || [];
+  const repList = o.reps || [];
+  const repSelect = (selected) => {
+    const byPod = {};
+    for (const p of repList) (byPod[p.pod || 'Other'] = byPod[p.pod || 'Other'] || []).push(p);
+    const opt = (n) => `<option value="${esc(n)}"${n === selected ? ' selected' : ''}>${esc(n)}</option>`;
+    const groups = Object.keys(byPod)
+      .sort()
+      .map((pod) => `<optgroup label="${esc(pod)}">${byPod[pod].map((p) => opt(p.name)).join('')}</optgroup>`);
+    // Keep a name that was saved earlier but is not on the list, so editing does not drop it.
+    const orphan = selected && !repList.some((p) => p.name === selected) ? `<optgroup label="Not on rep list">${opt(selected)}</optgroup>` : '';
+    return `<select name="rep_name"><option value="">Select a rep...</option>${groups.join('')}${orphan}</select>`;
+  };
   const repTotal = repAmounts.reduce((sum, x) => sum + x.amount, 0);
   const repSection = o.canEditRepAmounts
     ? `<form method="post" action="/requests/${r.id}/rep-amounts" class="panel">${csrfField(ctx)}
-      <p class="hint">What each rep will make. You can change this at any time, including after approval. Every change is recorded in the activity log. Clear a row to remove it; use a blank row to add a rep.</p>
+      <p class="hint">What each rep will make. You can change this at any time, including after approval. Every change is recorded in the activity log. Set a row back to "Select a rep..." and clear its amount to remove it; use a blank row to add a rep.</p>
       <table class="list"><thead><tr><th>Rep</th><th>Amount ($)</th><th>Note (optional)</th></tr></thead><tbody>
       ${repAmounts
         .concat(Array.from({ length: 5 }, () => ({ rep_name: '', amount: '', note: '' })))
         .map(
           (x) => `<tr>
-        <td><input name="rep_name" value="${esc(x.rep_name)}"></td>
+        <td>${repSelect(x.rep_name)}</td>
         <td><input name="rep_amount" type="number" step="0.01" min="0" value="${esc(x.amount)}"></td>
         <td><input name="rep_note" value="${esc(x.note || '')}"></td></tr>`
         )

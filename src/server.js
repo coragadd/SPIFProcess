@@ -397,6 +397,7 @@ app.get(
         auditRows: db.prepare('SELECT * FROM audit_log WHERE request_id = ? ORDER BY id').all(r.id),
         results: db.prepare('SELECT * FROM results WHERE request_id = ?').get(r.id),
         repAmounts: wf.getRepAmounts(r.id),
+        reps: wf.getReps(),
         canEditRepAmounts: wf.canEditRepAmounts(req.user, r),
       })
     );
