@@ -112,6 +112,19 @@ CREATE TABLE IF NOT EXISTS results (
   submitted_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- What each rep will make from a request. Mutable on purpose (editable after approval); every
+-- change is written to the audit log with the before and after.
+CREATE TABLE IF NOT EXISTS rep_amounts (
+  id INTEGER PRIMARY KEY,
+  request_id INTEGER NOT NULL REFERENCES requests(id),
+  rep_name TEXT NOT NULL,
+  amount REAL NOT NULL,
+  note TEXT,
+  updated_by INTEGER REFERENCES users(id),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_rep_amounts_request ON rep_amounts(request_id);
+
 CREATE TABLE IF NOT EXISTS audit_log (
   id INTEGER PRIMARY KEY,
   ts TEXT NOT NULL DEFAULT (datetime('now')),

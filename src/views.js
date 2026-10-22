@@ -287,11 +287,12 @@ function statusBadge(r, data, tz) {
   return `<span class="badge s-${esc(r.status)}">${esc(displayStatus(r, data, tz))}</span>`;
 }
 
-function requestList(ctx, rows, queue) {
+function requestList(ctx, rows, queue, repTotals) {
   const tz = ctx.user.timezone;
+  const totals = repTotals || {};
   const table = (list) =>
     list.length
-      ? `<table class="list"><thead><tr><th>#</th><th>Name</th><th>Type</th><th>Submitter</th><th>Run dates</th><th>Est. spend</th><th>Status</th></tr></thead><tbody>
+      ? `<table class="list"><thead><tr><th>#</th><th>Name</th><th>Type</th><th>Submitter</th><th>Run dates</th><th>Est. spend</th><th>Rep amounts</th><th>Status</th></tr></thead><tbody>
       ${list
         .map(
           (r) => `<tr>
@@ -301,6 +302,7 @@ function requestList(ctx, rows, queue) {
         <td>${esc(r.submitter_name)}</td>
         <td>${r.data.start_date ? esc(r.data.start_date + ' to ' + r.data.end_date) : ''}</td>
         <td>${esc(money(r.data.estimated_spend))}</td>
+        <td>${totals[r.id] != null ? esc(money(totals[r.id])) : '<span class="muted">Not set</span>'}</td>
         <td>${statusBadge(r, r.data, tz)}</td></tr>`
         )
         .join('')}</tbody></table>`
@@ -320,6 +322,29 @@ function requestList(ctx, rows, queue) {
 
 function requestDetail(ctx, o) {
   const { r, data, versions, steps, actions, auditRows, results } = o;
+  const repAmounts = o.repAmounts || [];
+  const repTotal = repAmounts.reduce((sum, x) => sum + x.amount, 0);
+  const repSection = o.canEditRepAmounts
+    ? `<form method="post" action="/requests/${r.id}/rep-amounts" class="panel">${csrfField(ctx)}
+      <p class="hint">What each rep will make. You can change this at any time, including after approval. Every change is recorded in the activity log. Clear a row to remove it; use a blank row to add a rep.</p>
+      <table class="list"><thead><tr><th>Rep</th><th>Amount ($)</th><th>Note (optional)</th></tr></thead><tbody>
+      ${repAmounts
+        .concat(Array.from({ length: 5 }, () => ({ rep_name: '', amount: '', note: '' })))
+        .map(
+          (x) => `<tr>
+        <td><input name="rep_name" value="${esc(x.rep_name)}"></td>
+        <td><input name="rep_amount" type="number" step="0.01" min="0" value="${esc(x.amount)}"></td>
+        <td><input name="rep_note" value="${esc(x.note || '')}"></td></tr>`
+        )
+        .join('')}</tbody></table>
+      <p>Total: <strong>${esc(money(repTotal))}</strong></p>
+      <button class="btn">Save rep amounts</button>
+    </form>`
+    : repAmounts.length
+    ? `<table class="list"><thead><tr><th>Rep</th><th>Amount</th><th>Note</th></tr></thead><tbody>
+      ${repAmounts.map((x) => `<tr><td>${esc(x.rep_name)}</td><td>${esc(money(x.amount))}</td><td>${esc(x.note || '')}</td></tr>`).join('')}
+      <tr><th>Total</th><th>${esc(money(repTotal))}</th><th></th></tr></tbody></table>`
+    : '<p class="muted">No rep amounts have been entered.</p>';
   const attachments = o.attachments || [];
   const filesFor = (version) => attachments.filter((a) => a.version === version);
   const tz = ctx.user.timezone;
@@ -429,6 +454,8 @@ function requestDetail(ctx, o) {
     ${isAdj ? `<div class="flash info">${esc(ADJUSTMENT_GUIDE)}</div>` : ''}
     <h2>Current terms</h2>
     ${termsTable(data, r.type, filesFor(r.current_version))}
+    <h2>Rep amounts</h2>
+    ${repSection}
     ${forms.join('')}
     ${results ? `<h2>Results</h2><table class="kv"><tr><th>Actual spend</th><td>${esc(money(results.actual_spend))}</td></tr>
       <tr><th>Deals / demos</th><td>${esc(results.deals_count == null ? '' : results.deals_count)}</td></tr>

@@ -328,6 +328,55 @@ function availableActions(user, r, data) {
   };
 }
 
+// ---------------------------------------------------------------- rep amounts
+
+// The submitter and admins can change what each rep will make, including after approval.
+function canEditRepAmounts(user, r) {
+  if (['cancelled', 'rejected'].includes(r.status)) return false;
+  return user.role === 'admin' || r.submitter_id === user.id;
+}
+
+function getRepAmounts(requestId) {
+  return db.prepare('SELECT * FROM rep_amounts WHERE request_id = ? ORDER BY id').all(requestId);
+}
+
+function repAmountTotals() {
+  const out = {};
+  for (const row of db.prepare('SELECT request_id, SUM(amount) AS total FROM rep_amounts GROUP BY request_id').all()) {
+    out[row.request_id] = row.total;
+  }
+  return out;
+}
+
+const saveRepAmounts = db.transaction((user, requestId, input) => {
+  const r = getRequest(requestId);
+  if (!r || !canEditRepAmounts(user, r)) throw new UserError('You cannot change the rep amounts on this request.');
+  const names = [].concat(input.rep_name || []).map((v) => String(v).trim());
+  const amounts = [].concat(input.rep_amount || []).map((v) => String(v).trim());
+  const notes = [].concat(input.rep_note || []).map((v) => String(v).trim());
+  const rows = [];
+  const seen = new Set();
+  for (let i = 0; i < names.length; i++) {
+    if (!names[i] && !amounts[i] && !notes[i]) continue; // blank spare row
+    if (!names[i]) throw new UserError(`Row ${i + 1}: enter the rep's name.`);
+    const amount = parseMoney(amounts[i]);
+    if (amount == null || amount < 0) throw new UserError(`${names[i]}: enter the amount as a number, 0 or more.`);
+    const key = names[i].toLowerCase();
+    if (seen.has(key)) throw new UserError(`${names[i]} is listed more than once.`);
+    seen.add(key);
+    rows.push({ rep_name: names[i], amount, note: notes[i] || null });
+  }
+  const before = getRepAmounts(requestId).map((x) => ({ rep: x.rep_name, amount: x.amount, note: x.note }));
+  const after = rows.map((x) => ({ rep: x.rep_name, amount: x.amount, note: x.note }));
+  if (JSON.stringify(before) === JSON.stringify(after)) return false;
+  db.prepare('DELETE FROM rep_amounts WHERE request_id = ?').run(requestId);
+  const ins = db.prepare('INSERT INTO rep_amounts (request_id, rep_name, amount, note, updated_by) VALUES (?, ?, ?, ?, ?)');
+  for (const x of rows) ins.run(requestId, x.rep_name, x.amount, x.note, user.id);
+  db.prepare("UPDATE requests SET updated_at = datetime('now') WHERE id = ?").run(requestId);
+  audit(user, 'rep_amounts.updated', 'request', requestId, requestId, { status: r.status, before, after });
+  return true;
+});
+
 function displayStatus(r, data, tz) {
   if (r.status !== 'approved' || r.type === 'adjustment' || !data.start_date) return STATUS_LABELS[r.status] || r.status;
   const today = todayIn(tz || 'America/New_York');
@@ -649,6 +698,10 @@ module.exports = {
   listRequests,
   queueFor,
   availableActions,
+  canEditRepAmounts,
+  getRepAmounts,
+  repAmountTotals,
+  saveRepAmounts,
   displayStatus,
   isApprover,
   createRequest,

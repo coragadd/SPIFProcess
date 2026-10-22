@@ -367,7 +367,7 @@ app.get(
   '/requests',
   wrap((req, res) => {
     const rows = wf.listRequests(req.user);
-    res.send(views.requestList(ctx(req), rows, wf.queueFor(req.user, rows)));
+    res.send(views.requestList(ctx(req), rows, wf.queueFor(req.user, rows), wf.repAmountTotals()));
   })
 );
 
@@ -396,6 +396,8 @@ app.get(
         actions: wf.availableActions(req.user, r, data),
         auditRows: db.prepare('SELECT * FROM audit_log WHERE request_id = ? ORDER BY id').all(r.id),
         results: db.prepare('SELECT * FROM results WHERE request_id = ?').get(r.id),
+        repAmounts: wf.getRepAmounts(r.id),
+        canEditRepAmounts: wf.canEditRepAmounts(req.user, r),
       })
     );
   })
@@ -498,6 +500,7 @@ actionRoute('approver', wf.approverDecide, 'Approver decision recorded.');
 actionRoute('skip', wf.adminSkip, 'Step skipped and logged.');
 actionRoute('cancel', wf.cancelRequest, 'Request cancelled.');
 actionRoute('results', wf.submitResults, 'Results submitted. The request is finalized.');
+actionRoute('rep-amounts', wf.saveRepAmounts, 'Rep amounts saved.');
 
 // ---------------------------------------------------------------- saved recurring SPIFs
 
