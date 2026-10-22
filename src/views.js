@@ -325,12 +325,13 @@ function requestDetail(ctx, o) {
   const repAmounts = o.repAmounts || [];
   const repList = o.reps || [];
   const repSelect = (selected) => {
-    const byPod = {};
-    for (const p of repList) (byPod[p.pod || 'Other'] = byPod[p.pod || 'Other'] || []).push(p);
+    // repList arrives already ordered by group, so keep first-seen order.
+    const byGroup = new Map();
+    for (const p of repList) byGroup.set(p.group, (byGroup.get(p.group) || []).concat(p));
     const opt = (n) => `<option value="${esc(n)}"${n === selected ? ' selected' : ''}>${esc(n)}</option>`;
-    const groups = Object.keys(byPod)
-      .sort()
-      .map((pod) => `<optgroup label="${esc(pod)}">${byPod[pod].map((p) => opt(p.name)).join('')}</optgroup>`);
+    const groups = [...byGroup].map(
+      ([group, list]) => `<optgroup label="${esc(group)}">${list.map((p) => opt(p.name)).join('')}</optgroup>`
+    );
     // Keep a name that was saved earlier but is not on the list, so editing does not drop it.
     const orphan = selected && !repList.some((p) => p.name === selected) ? `<optgroup label="Not on rep list">${opt(selected)}</optgroup>` : '';
     return `<select name="rep_name"><option value="">Select a rep...</option>${groups.join('')}${orphan}</select>`;

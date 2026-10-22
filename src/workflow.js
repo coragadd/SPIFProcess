@@ -336,8 +336,29 @@ function canEditRepAmounts(user, r) {
   return user.role === 'admin' || r.submitter_id === user.id;
 }
 
+// Rep picklist: these groups, in this order. Anyone whose POD is not listed (leadership,
+// enablement, migration and so on) is left out of the picklist.
+const REP_GROUPS = [
+  { label: 'Red', pods: ['Red'] },
+  { label: 'Blue', pods: ['Blue'] },
+  { label: 'Green', pods: ['Green'] },
+  { label: 'Black', pods: ['Black'] },
+  { label: 'Expansion', pods: ['Expansion'] },
+  { label: 'oBDR', pods: ['oBDR'] },
+  { label: 'iBDR', pods: ['iBDR'] },
+  { label: 'amBDR', pods: ['amBDR'] },
+  { label: 'tBDR', pods: ['tBDR'] },
+  { label: 'Merchant Services', pods: ['Merchant Services'] },
+  { label: 'Customer Care', pods: ['Customer Care'] },
+];
+
 function getReps() {
-  return db.prepare('SELECT * FROM reps WHERE active = 1 ORDER BY pod, name').all();
+  const rows = db.prepare('SELECT * FROM reps WHERE active = 1 ORDER BY name').all();
+  const out = [];
+  for (const g of REP_GROUPS) {
+    for (const r of rows) if (g.pods.includes(r.pod)) out.push({ ...r, group: g.label });
+  }
+  return out;
 }
 
 function getRepAmounts(requestId) {
