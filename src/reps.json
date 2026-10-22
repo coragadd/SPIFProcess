@@ -150,12 +150,6 @@
         "unit":  "Quilt"
     },
     {
-        "name":  "Imane Benchekroun",
-        "role":  "iBDR",
-        "pod":  "iBDR",
-        "unit":  "SBU"
-    },
-    {
         "name":  "Jack Crump",
         "role":  "iBDR",
         "pod":  "iBDR",
@@ -225,12 +219,6 @@
         "name":  "Maddie Vollmer",
         "role":  "iBDR - TL",
         "pod":  "iBDR",
-        "unit":  "Quilt"
-    },
-    {
-        "name":  "Mason Bartlett",
-        "role":  "oBDR",
-        "pod":  "oBDR",
         "unit":  "Quilt"
     },
     {

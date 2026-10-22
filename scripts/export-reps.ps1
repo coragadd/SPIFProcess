@@ -1,7 +1,8 @@
 # Regenerates src/reps.json from the Quilt-Population-Master tab of the reference workbook.
 # Usage (from the repo root):  powershell -File scripts\export-reps.ps1 [-Workbook path.xlsx] [-AsOf 2026-10-01]
-# A rep is "current" when their latest row on or before AsOf has Status = Active. Only name, role,
-# pod and unit are written out; salary and OTE columns are never copied.
+# The sheet has one row per person per month, and people who leave simply stop appearing (their
+# last row can still say Active). So a rep is "current" only if they have a row for AsOf's month
+# with Status = Active. Only name, role, pod and unit are written out; salary and OTE are never copied.
 param(
   [string]$Workbook = (Join-Path $PSScriptRoot '..\spif-process-reference.xlsx'),
   [datetime]$AsOf = (Get-Date -Day 1).Date
@@ -34,9 +35,8 @@ try {
   }
 } finally { $z.Dispose() }
 
-$current = $recs | Where-Object { $_.Start -le $AsOf } | Group-Object Name | ForEach-Object {
-  $_.Group | Sort-Object Start | Select-Object -Last 1
-} | Where-Object Status -eq 'Active' | Sort-Object Name
+$current = $recs | Where-Object { $_.Start.ToString('yyyy-MM') -eq $AsOf.ToString('yyyy-MM') -and $_.Status -eq 'Active' } |
+  Sort-Object Name -Unique
 
 $out = @($current | ForEach-Object { [ordered]@{ name = $_.Name; role = $_.Role; pod = $_.Pod; unit = $_.Unit } })
 $json = ConvertTo-Json -InputObject $out -Depth 3

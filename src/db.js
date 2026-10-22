@@ -185,15 +185,19 @@ addColumnIfMissing('users', 'tier', 'INTEGER NOT NULL DEFAULT 3');
 // those users to the plain 'submitter' role.
 db.exec(`UPDATE users SET tier = 1, role = 'submitter' WHERE role = 'approver'`);
 
-// Add any reps from reps.json that are not in the table yet. Existing rows are left alone, so a
-// rep an admin deactivated stays deactivated.
+// reps.json is the source of truth for who is active. On every start, add or update everyone in it
+// and deactivate anyone who is no longer listed (rows are kept, never deleted).
 function seedReps() {
   const file = path.join(__dirname, 'reps.json');
   if (!fs.existsSync(file)) return;
   const list = JSON.parse(fs.readFileSync(file, 'utf8'));
-  const ins = db.prepare('INSERT OR IGNORE INTO reps (name, role, pod, unit) VALUES (?, ?, ?, ?)');
+  const upsert = db.prepare(
+    `INSERT INTO reps (name, role, pod, unit, active) VALUES (?, ?, ?, ?, 1)
+     ON CONFLICT(name) DO UPDATE SET role = excluded.role, pod = excluded.pod, unit = excluded.unit, active = 1`
+  );
   db.transaction(() => {
-    for (const r of list) ins.run(r.name, r.role || null, r.pod || null, r.unit || null);
+    db.prepare('UPDATE reps SET active = 0').run();
+    for (const r of list) upsert.run(r.name, r.role || null, r.pod || null, r.unit || null);
   })();
 }
 seedReps();
