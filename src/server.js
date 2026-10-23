@@ -566,6 +566,7 @@ app.post(
 app.get(
   '/reports',
   wrap((req, res) => {
+    if (req.user.role !== 'admin') return res.send(views.reportsComingSoon(ctx(req)));
     const nowYear = Number(wf.todayIn(req.user.timezone).slice(0, 4));
     const minRow = db.prepare('SELECT MIN(substr(created_at, 1, 4)) AS y FROM requests').get();
     const minYear = Math.min(minRow && minRow.y ? Number(minRow.y) : nowYear, nowYear);

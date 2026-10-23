@@ -631,6 +631,17 @@ function savedList(ctx, rows) {
   );
 }
 
+// Reports are admin-only for now; everyone else sees a placeholder.
+function reportsComingSoon(ctx) {
+  return page(
+    ctx,
+    'Reports',
+    `<a class="back" href="/">&larr; Home</a>
+    <h1>Reports</h1>
+    <p class="subtitle">Coming Soon</p>`
+  );
+}
+
 function reports(ctx, data, year, years) {
   const t = (rows, label) =>
     rows.length
@@ -843,6 +854,7 @@ module.exports = {
   requestDetail,
   savedList,
   reports,
+  reportsComingSoon,
   auditPage,
   admin,
   account,
