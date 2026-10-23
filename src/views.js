@@ -241,8 +241,7 @@ function requestForm(ctx, o) {
     ${input('deal', 'Deal or component (optional)', values, errors, { hint: 'Leave blank if the adjustment is not tied to a specific deal or component.' })}
     ${select('adjustment_size', 'Adjustment size', values, errors, [['full', 'Full'], ['half', 'Half']])}
     ${textarea('adjustment_reason', 'Reason for the adjustment', values, errors)}
-    ${input('amounts', 'Payout amount', values, errors, { hint: 'e.g. $450 commission adjustment' })}
-    ${input('estimated_spend', 'Estimated total spend ($)', values, errors, { type: 'number', step: '0.01' })}`;
+    ${input('amounts', 'Payout amount', values, errors, { hint: 'e.g. $450 commission adjustment' })}`;
 
   const payoutGroup = (key, inner) =>
     `<div data-payout-group="${key}"${values.payout_structure === key ? '' : ' hidden'}>${inner}</div>`;

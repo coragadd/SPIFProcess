@@ -270,9 +270,13 @@ function validate(type, input, user, opts) {
       ? 'Individual: ' + d.participants_individual
       : d.participants_group + (d.participants_pods.length ? ' (' + d.participants_pods.join(', ') + ')' : '');
 
-  const spend = parseMoney(s('estimated_spend'));
-  if (spend == null || spend < 0) errors.estimated_spend = 'Enter the estimated total spend as a number.';
-  d.estimated_spend = spend == null ? '' : spend;
+  // Adjustments have no estimated spend; everything else does.
+  d.estimated_spend = '';
+  if (!isAdj) {
+    const spend = parseMoney(s('estimated_spend'));
+    if (spend == null || spend < 0) errors.estimated_spend = 'Enter the estimated total spend as a number.';
+    d.estimated_spend = spend == null ? '' : spend;
+  }
 
   if (isAdj) {
     need('amounts', 'Payout amount');
