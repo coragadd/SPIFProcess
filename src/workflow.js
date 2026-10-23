@@ -48,10 +48,8 @@ const TERM_FIELDS = [
   'description',
   'payout_structure',
   'payout_flat',
-  'payout_tier_count',
-  'payout_tier_1',
-  'payout_tier_2',
-  'payout_tier_3',
+  'payout_rank_count',
+  'payout_ranks',
   'payout_kpi',
   'payout_rate',
   'calculated_by',
@@ -76,14 +74,13 @@ const GROUPS = [
 ];
 const PODS = ['All PODs', 'Red', 'Blue', 'Green', 'Black'];
 
-const PAYOUT_TYPES = ['flat', 'tiered', 'calculated'];
+const PAYOUT_TYPES = ['flat', 'ranked', 'calculated'];
+const MAX_RANKS = 50;
 const CALCULATORS = ['submitter', 'commissions'];
 const PAYOUT_FIELDS = [
   'payout_flat',
-  'payout_tier_count',
-  'payout_tier_1',
-  'payout_tier_2',
-  'payout_tier_3',
+  'payout_rank_count',
+  'payout_ranks',
   'payout_kpi',
   'payout_rate',
 ];
@@ -262,13 +259,18 @@ function validate(type, input, user, opts) {
   d.payout_structure = s('payout_structure');
   if (d.payout_structure === 'flat') {
     d.payout_flat = payoutAmount('payout_flat', 'Payout amount');
-  } else if (d.payout_structure === 'tiered') {
-    const count = s('payout_tier_count');
-    if (!['2', '3'].includes(count)) {
-      errors.payout_tier_count = 'Choose 2 or 3 tiers. A single amount is a flat payout.';
+  } else if (d.payout_structure === 'ranked') {
+    const count = Number(s('payout_rank_count'));
+    if (!Number.isInteger(count) || count < 2 || count > MAX_RANKS) {
+      errors.payout_rank_count = `Enter a whole number from 2 to ${MAX_RANKS}. A single amount is a flat payout.`;
     } else {
-      d.payout_tier_count = Number(count);
-      for (let i = 1; i <= d.payout_tier_count; i++) d['payout_tier_' + i] = payoutAmount('payout_tier_' + i, `Tier ${i} payout amount`);
+      d.payout_rank_count = count;
+      const given = [].concat(input.payout_rank || input.payout_ranks || []).map((v) => parseMoney(v));
+      d.payout_ranks = [];
+      for (let i = 0; i < count; i++) {
+        if (given[i] == null || given[i] <= 0) errors.payout_ranks = 'Enter a payout amount greater than 0 for every rank.';
+        d.payout_ranks.push(given[i] == null ? '' : given[i]);
+      }
     }
   } else if (d.payout_structure === 'calculated') {
     need('payout_kpi', 'KPI');

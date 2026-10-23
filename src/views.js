@@ -34,11 +34,11 @@ const TIER_LABELS = {
 // Payout types offered on the form. 'flat_rate' only appears on requests from before these existed.
 const PAYOUT_TYPES = [
   ['flat', 'Flat payout'],
-  ['tiered', 'Tiered payout'],
+  ['ranked', 'Ranked payout'],
   ['calculated', 'Calculated payout'],
 ];
 const PAYOUT_LABELS = { ...Object.fromEntries(PAYOUT_TYPES), flat_rate: 'Flat rate' };
-const CALCULATOR_LABELS = { submitter: 'The submitter', commissions: 'The commissions team' };
+const CALCULATOR_LABELS = { commissions: 'Rev Ops', submitter: 'Submitter' };
 
 const ADJUSTMENT_GUIDE =
   'Adjustment guide: adjustments are treated as expenses by default.';
@@ -86,7 +86,7 @@ function input(name, label, values, errors, o) {
   const opt = o || {};
   const inner = `<input id="${name}" name="${name}" type="${opt.type || 'text'}" value="${esc(values[name])}"${
     opt.readonly ? ' readonly' : ''
-  }${opt.step ? ` step="${opt.step}"` : ''}>`;
+  }${opt.step ? ` step="${opt.step}"` : ''}${opt.min ? ` min="${opt.min}"` : ''}${opt.max ? ` max="${opt.max}"` : ''}>`;
   return fieldWrap(name, label, opt.hint, errors, inner);
 }
 
@@ -233,25 +233,30 @@ function requestForm(ctx, o) {
 
   const payoutGroup = (key, inner) =>
     `<div data-payout-group="${key}"${values.payout_structure === key ? '' : ' hidden'}>${inner}</div>`;
-  const tierCount = String(values.payout_tier_count || '');
+  const rankCount = Math.min(Math.max(parseInt(values.payout_rank_count, 10) || 2, 2), 50);
+  const rankValues = [].concat(values.payout_rank || values.payout_ranks || []);
+  const rankInputs = Array.from(
+    { length: rankCount },
+    (_, i) => `<div class="field"><label>Rank ${i + 1} payout amount ($)</label>
+      <input name="payout_rank" type="number" step="0.01" value="${esc(rankValues[i])}"></div>`
+  ).join('');
   const spifFields = `
     ${values.amounts ? `<div class="flash info"><strong>Previous payout amounts:</strong> <span class="pre">${esc(values.amounts)}</span><br>Enter them in the payout fields below.</div>` : ''}
     <details class="info">
       <summary>What do the payout types mean?</summary>
       <ul>
         <li><strong>Flat payout:</strong> one amount per winner. Example: $300.</li>
-        <li><strong>Tiered payout:</strong> 2 or 3 tiers, each with its own amount. Example: Tier 1 $500, Tier 2 $200.</li>
+        <li><strong>Ranked payout:</strong> a competition between reps. Reps are ranked on a result and each paid rank gets its own amount; you choose how many ranks are paid (2 or more). Example: 1st place $500, 2nd place $200.</li>
         <li><strong>Calculated payout:</strong> the amount depends on a KPI. Example: KPI = demos attended, rate = $20 per demo.</li>
       </ul>
     </details>
     ${select('payout_structure', 'Payout structure', values, errors, PAYOUT_TYPES)}
     ${payoutGroup('flat', input('payout_flat', 'Payout amount ($)', values, errors, { type: 'number', step: '0.01' }))}
     ${payoutGroup(
-      'tiered',
-      `${select('payout_tier_count', 'How many tiers?', values, errors, [['2', '2 tiers'], ['3', '3 tiers']], { hint: 'One tier is a flat payout.' })}
-      ${input('payout_tier_1', 'Tier 1 payout amount ($)', values, errors, { type: 'number', step: '0.01' })}
-      ${input('payout_tier_2', 'Tier 2 payout amount ($)', values, errors, { type: 'number', step: '0.01' })}
-      <div id="tier-3-wrap"${tierCount === '3' ? '' : ' hidden'}>${input('payout_tier_3', 'Tier 3 payout amount ($)', values, errors, { type: 'number', step: '0.01' })}</div>`
+      'ranked',
+      `${input('payout_rank_count', 'How many ranks are paid?', values, errors, { type: 'number', min: '2', max: '50', step: '1', hint: 'Enter 2 or more. One rank is a flat payout.' })}
+      <div id="rank-amounts">${rankInputs}</div>
+      ${errors.payout_ranks ? `<div class="err">${esc(errors.payout_ranks)}</div>` : ''}`
     )}
     ${payoutGroup(
       'calculated',
@@ -305,8 +310,8 @@ function termsTable(data, type, files) {
   } else {
     add('Payout structure', PAYOUT_LABELS[data.payout_structure] || data.payout_structure);
     if (data.payout_structure === 'flat') add('Payout amount', money(data.payout_flat));
-    if (data.payout_structure === 'tiered') {
-      for (let i = 1; i <= Number(data.payout_tier_count); i++) add(`Tier ${i} payout amount`, money(data['payout_tier_' + i]));
+    if (data.payout_structure === 'ranked') {
+      [].concat(data.payout_ranks || []).forEach((amt, i) => add(`Rank ${i + 1} payout amount`, money(amt)));
     }
     if (data.payout_structure === 'calculated') {
       add('KPI', data.payout_kpi);
@@ -411,7 +416,7 @@ function requestDetail(ctx, o) {
       <tr><th>Total</th><th>${esc(money(repTotal))}</th><th></th></tr></tbody></table>`
     : `<p class="muted">${
         data.calculated_by === 'commissions'
-          ? 'The commissions team will enter the winners and payout amounts.'
+          ? 'Rev Ops will enter the winners and payout amounts.'
           : 'No rep amounts have been entered.'
       }</p>`;
   const attachments = o.attachments || [];

@@ -74,15 +74,29 @@
   var payout = document.querySelector('[name=payout_structure]');
   if (payout) {
     var groups = document.querySelectorAll('[data-payout-group]');
-    var tierCount = document.querySelector('[name=payout_tier_count]');
-    var tier3 = document.getElementById('tier-3-wrap');
     var syncPayout = function () {
       for (var g = 0; g < groups.length; g++) groups[g].hidden = groups[g].getAttribute('data-payout-group') !== payout.value;
-      if (tierCount && tier3) tier3.hidden = tierCount.value !== '3';
     };
     payout.addEventListener('change', syncPayout);
-    if (tierCount) tierCount.addEventListener('change', syncPayout);
     syncPayout();
+
+    // Ranked: one amount box per rank, following the rank count.
+    var rankCount = document.querySelector('[name=payout_rank_count]');
+    var rankBox = document.getElementById('rank-amounts');
+    if (rankCount && rankBox) {
+      rankCount.addEventListener('input', function () {
+        var n = parseInt(rankCount.value, 10);
+        if (!(n >= 2)) return;
+        n = Math.min(n, 50);
+        while (rankBox.children.length > n) rankBox.removeChild(rankBox.lastElementChild);
+        for (var i = rankBox.children.length + 1; i <= n; i++) {
+          var wrap = document.createElement('div');
+          wrap.className = 'field';
+          wrap.innerHTML = '<label>Rank ' + i + ' payout amount ($)</label><input name="payout_rank" type="number" step="0.01">';
+          rankBox.appendChild(wrap);
+        }
+      });
+    }
   }
 
   // Finance: the concern box appears when "Report a concern" is checked.
