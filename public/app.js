@@ -110,6 +110,26 @@
     syncConcern();
   }
 
+  // Admin: click a user's row to open its edit form underneath; click again (or Close) to fold it.
+  var userLines = document.querySelectorAll('tr.user-line');
+  for (var u = 0; u < userLines.length; u++) {
+    (function (line) {
+      var edit = line.nextElementSibling;
+      var toggle = function () {
+        edit.hidden = !edit.hidden;
+        line.classList.toggle('open', !edit.hidden);
+      };
+      line.addEventListener('click', toggle);
+      line.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          toggle();
+        }
+      });
+      edit.querySelector('.user-cancel').addEventListener('click', toggle);
+    })(userLines[u]);
+  }
+
   // Admin: finance users have no tier.
   var roleSelects = document.querySelectorAll('select[name=role]');
   for (var r = 0; r < roleSelects.length; r++) {

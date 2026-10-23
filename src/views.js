@@ -1,4 +1,4 @@
-'use strict';
+﻿'use strict';
 const { TYPES, STATUS_LABELS, TIMEZONES, GROUPS, PODS, displayStatus, halfYearLabel, todayIn } = require('./workflow');
 
 const esc = (s) =>
@@ -721,13 +721,16 @@ function admin(ctx, o) {
       </form>
     </details>
 
-    <div class="userlist">
+    <table class="grid users-grid">
+      <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Tier</th><th>Time zone</th><th>Slack ID</th><th>Status</th></tr></thead>
+      <tbody>
     ${users
       .map(
-        (u) => `<details class="userrow">
-      <summary><span class="uname">${esc(u.name)}</span> <span class="muted">${esc(u.email)} &middot; ${esc(ROLE_LABELS[u.role])}${
-          u.role === 'finance' ? '' : ' &middot; Tier ' + u.tier
-        }${u.active ? '' : ' &middot; Inactive'}</span></summary>
+        (u) => `<tr class="user-line${u.active ? '' : ' inactive'}" tabindex="0" title="Click to edit">
+        <td class="uname">${esc(u.name)}</td><td>${esc(u.email)}</td><td>${esc(ROLE_LABELS[u.role])}</td>
+        <td>${u.role === 'finance' ? '' : u.tier}</td><td>${esc(u.timezone)}</td><td>${esc(u.slack_id || '')}</td>
+        <td>${u.active ? 'Active' : 'Inactive'}</td></tr>
+      <tr class="user-edit" hidden><td colspan="7">
       <form method="post" action="/admin/users/${u.id}" class="panel">
       ${csrfField(ctx)}
       <div class="row">
@@ -745,11 +748,12 @@ function admin(ctx, o) {
         <div class="field"><label>New password (leave blank to keep)</label><input name="password" type="password" autocomplete="new-password"></div>
       </div>
       <button class="btn">Save ${esc(u.name)}</button>
-      </form>
-    </details>`
+      <button type="button" class="btn secondary user-cancel">Close</button>
+      </form></td></tr>`
       )
       .join('')}
-    </div>
+      </tbody>
+    </table>
 
     <h2>Saved recurring SPIFs (${saved.length})</h2>
     <p><a href="/saved">Manage saved SPIFs</a> &middot; <a href="/admin/saved-spifs.csv">Export all saved SPIFs (CSV)</a></p>`
