@@ -31,9 +31,11 @@ function post(url, headers, payload, label) {
 }
 
 // target is a channel ID or, for a DM, a user's Slack member ID.
-function send(target, text) {
+// `what` names the destination in log lines, so a missing setting is easy to spot.
+function send(target, text, what) {
   const token = process.env.SLACK_BOT_TOKEN;
-  if (!token || !target) return;
+  if (!token) return console.warn(`Slack: not sending to ${what}, SLACK_BOT_TOKEN is not set.`);
+  if (!target) return console.warn(`Slack: not sending to ${what}, its ID is not set.`);
   try {
     post((process.env.SLACK_API_URL || 'https://slack.com/api') + '/chat.postMessage', { Authorization: `Bearer ${token}` }, { channel: target, text }, target);
   } catch (e) {
@@ -42,7 +44,7 @@ function send(target, text) {
 }
 
 function toFinance(text) {
-  if (process.env.SLACK_BOT_TOKEN) return send(process.env.SLACK_FINANCE_CHANNEL_ID, text);
+  if (process.env.SLACK_BOT_TOKEN) return send(process.env.SLACK_FINANCE_CHANNEL_ID, text, 'the finance channel (SLACK_FINANCE_CHANNEL_ID)');
   const webhook = process.env.SLACK_WEBHOOK_URL;
   if (!webhook) return;
   try {
@@ -52,11 +54,11 @@ function toFinance(text) {
   }
 }
 
-const toCommission = (text) => send(process.env.SLACK_COMMISSION_CHANNEL_ID, text);
+const toCommission = (text) => send(process.env.SLACK_COMMISSION_CHANNEL_ID, text, 'the commission channel (SLACK_COMMISSION_CHANNEL_ID)');
 
 function dm(userId, text) {
-  const u = db.prepare('SELECT slack_id FROM users WHERE id = ? AND active = 1').get(userId);
-  if (u && u.slack_id) send(u.slack_id, text);
+  const u = db.prepare('SELECT name, slack_id FROM users WHERE id = ? AND active = 1').get(userId);
+  if (u) send(u.slack_id, text, `${u.name} (no Slack member ID saved in Admin)`);
 }
 
 // The approvers assigned to this submitter (their tier 1 and tier 2 reports). Submitters with none
