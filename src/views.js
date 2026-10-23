@@ -728,7 +728,7 @@ function admin(ctx, o) {
       .map(
         (u) => `<tr class="user-line${u.active ? '' : ' inactive'}" tabindex="0" title="Click to edit">
         <td class="uname">${esc(u.name)}</td><td>${esc(u.email)}</td><td>${esc(ROLE_LABELS[u.role])}</td>
-        <td>${u.role === 'finance' ? '' : u.tier}</td><td>${esc(u.timezone)}</td><td>${esc(u.slack_id || '')}</td>
+        <td>${u.role !== 'submitter' ? '' : u.tier}</td><td>${esc(u.timezone)}</td><td>${esc(u.slack_id || '')}</td>
         <td>${u.active ? 'Active' : 'Inactive'}</td></tr>
       <tr class="user-edit" hidden><td colspan="7">
       <form method="post" action="/admin/users/${u.id}" class="panel">
@@ -739,7 +739,7 @@ function admin(ctx, o) {
       </div>
       <div class="row">
         <div class="field"><label>Role</label><select name="role">${roleOptions(u.role)}</select></div>
-        <div class="field" data-tier-field${u.role === 'finance' ? ' hidden' : ''}><label>Tier</label><select name="tier">${tierOptions(u.tier)}</select></div>
+        <div class="field" data-tier-field${u.role !== 'submitter' ? ' hidden' : ''}><label>Tier</label><select name="tier">${tierOptions(u.tier)}</select></div>
         <div class="field"><label>Time zone</label><select name="timezone">${tzOptions(u.timezone)}</select></div>
         <div class="field"><label>Status</label><select name="active"><option value="1"${u.active ? ' selected' : ''}>Active</option><option value="0"${u.active ? '' : ' selected'}>Inactive</option></select></div>
       </div>

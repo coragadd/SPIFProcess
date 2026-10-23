@@ -676,15 +676,15 @@ function cleanUserInput(body) {
   const name = String(body.name || '').trim();
   const email = String(body.email || '').trim().toLowerCase();
   const role = String(body.role || '');
-  // Finance users have no tier field; `tier` is null and callers keep the stored value (3 for new users).
-  const tier = role === 'finance' ? null : Number(body.tier);
+  // Only standard users have a tier field; `tier` is null and callers keep the stored value (3 for new users).
+  const tier = role !== 'submitter' ? null : Number(body.tier);
   const timezone = String(body.timezone || '');
   const password = String(body.password || '');
   const slackId = String(body.slack_id || '').trim();
   if (!name) throw new UserError('Name is required.');
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new UserError('Enter a valid email address.');
   if (!ROLES.includes(role)) throw new UserError('Choose a valid role.');
-  if (role !== 'finance' && ![1, 2, 3].includes(tier)) throw new UserError('Choose a tier.');
+  if (role === 'submitter' && ![1, 2, 3].includes(tier)) throw new UserError('Choose a tier.');
   if (!wf.isValidTz(timezone)) throw new UserError('Choose a valid time zone.');
   if (password && password.length < 10) throw new UserError('Passwords need at least 10 characters.');
   if (slackId && !/^[UW][A-Z0-9]{6,}$/.test(slackId)) {

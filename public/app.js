@@ -130,14 +130,14 @@
     })(userLines[u]);
   }
 
-  // Admin: finance users have no tier.
+  // Admin: only standard users have a tier.
   var roleSelects = document.querySelectorAll('select[name=role]');
   for (var r = 0; r < roleSelects.length; r++) {
     (function (sel) {
       var tierField = sel.form.querySelector('[data-tier-field]');
       if (!tierField) return;
       var syncTier = function () {
-        tierField.hidden = sel.value === 'finance';
+        tierField.hidden = sel.value !== 'submitter';
       };
       sel.addEventListener('change', syncTier);
       syncTier();
