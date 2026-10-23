@@ -89,8 +89,7 @@ function notifyRequest(req, id) {
       for (const a of approversFor(r)) dm(a.id, `*${type} needs your approval:* ${link}\nSubmitted by ${r.submitter_name}${concern}`);
       dm(r.submitter_id, `Finance has reviewed your ${type} ${link}. It is now with the approver.${concern}`);
     } else if (r.status === 'approved' && data.bonus_kind === 'mbo') {
-      // No review for an MBO, so the only follow-up is Rev Ops paying it.
-      toCommission(`*Monthly MBO entered:* ${link}\n${data.mbo_rep}, ${data.mbo_month}, $${Number(data.mbo_amount).toFixed(2)}. Submitted by ${r.submitter_name}`);
+      // A monthly MBO is approved on submission and sends no Slack messages.
     } else if (r.status === 'approved') {
       const through = r.approval_scope === 'half_year' && r.approval_through ? ` through ${wf.halfYearLabel(r.approval_through)}` : '';
       dm(r.submitter_id, `Your ${type} ${link} was approved${through}.`);
