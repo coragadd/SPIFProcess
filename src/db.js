@@ -193,6 +193,8 @@ addColumnIfMissing('users', 'tier', 'INTEGER NOT NULL DEFAULT 3');
 // The old 'approver' role became tier 1. The CHECK constraint still allows the value, so move
 // those users to the plain 'submitter' role.
 db.exec(`UPDATE users SET tier = 1, role = 'submitter' WHERE role = 'approver'`);
+// Admins have every permission and no tier.
+db.exec(`UPDATE users SET tier = 3 WHERE role = 'admin' AND tier != 3`);
 
 // reps.json is the source of truth for who is active. On every start, add or update everyone in it
 // and deactivate anyone who is no longer listed (rows are kept, never deleted).

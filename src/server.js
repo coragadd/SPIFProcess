@@ -704,7 +704,7 @@ app.post(
   wrap((req, res) => {
     const u = cleanUserInput(req.body);
     if (!u.password) throw new UserError('A temporary password is required.');
-    const tier = u.tier || 3;
+    const tier = u.role === 'admin' ? 3 : u.tier || 3;
     try {
       const info = db
         .prepare('INSERT INTO users (name, email, password_hash, role, tier, timezone, slack_id) VALUES (?, ?, ?, ?, ?, ?, ?)')
@@ -730,7 +730,7 @@ app.post(
     if (id === req.user.id && (!active || u.role !== 'admin')) {
       throw new UserError('You cannot deactivate or demote yourself.');
     }
-    const tier = u.tier || before.tier;
+    const tier = u.role === 'admin' ? 3 : u.tier || before.tier;
     try {
       db.prepare('UPDATE users SET name = ?, email = ?, role = ?, tier = ?, timezone = ?, slack_id = ?, active = ? WHERE id = ?').run(
         u.name,

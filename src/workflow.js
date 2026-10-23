@@ -161,14 +161,16 @@ function halfYearLabel(date) {
   return date.endsWith('-06-30') ? 'June 30' : 'December 31';
 }
 
-// Tiers 1 and 2 can approve; a user can approve only requests from a strictly higher tier number
-// (tier 1 approves tier 2 and 3, tier 2 approves tier 3). Tier 3 cannot approve.
+// Admins can approve any request but their own. Otherwise tiers 1 and 2 can approve, and a user can
+// approve only requests from a strictly higher tier number (tier 1 approves tier 2 and 3, tier 2
+// approves tier 3). Tier 3 cannot approve.
 function isApprover(user) {
-  return user.tier <= 2;
+  return user.role === 'admin' || user.tier <= 2;
 }
 
-function canApprove(user, submitterTier) {
-  return isApprover(user) && user.tier < submitterTier;
+function canApprove(user, r) {
+  if (user.role === 'admin') return r.submitter_id !== user.id;
+  return isApprover(user) && user.tier < r.submitter_tier;
 }
 
 // Every request goes to finance first. Tier 1 submitters have no higher-tier approver, so for
@@ -350,7 +352,7 @@ function currentData(r) {
 function canView(user, r) {
   if (['admin', 'finance'].includes(user.role)) return true;
   if (r.submitter_id === user.id) return true;
-  return canApprove(user, r.submitter_tier);
+  return canApprove(user, r);
 }
 
 function listRequests(user) {
@@ -370,7 +372,7 @@ function queueFor(user, rows) {
   return rows.filter(
     (r) =>
       (r.status === 'finance_review' && ['finance', 'admin'].includes(user.role) && r.submitter_id !== user.id) ||
-      (r.status === 'approver_review' && canApprove(user, r.submitter_tier))
+      (r.status === 'approver_review' && canApprove(user, r))
   );
 }
 
@@ -380,7 +382,7 @@ function availableActions(user, r, data) {
   const today = todayIn(user.timezone || 'America/New_York');
   return {
     finance: r.status === 'finance_review' && ['finance', 'admin'].includes(user.role) && !self,
-    approver: r.status === 'approver_review' && canApprove(user, r.submitter_tier),
+    approver: r.status === 'approver_review' && canApprove(user, r),
     skip: pending && user.role === 'admin' && !self,
     halfYearEnd: halfYearEnd(today),
     cancel: (pending || r.status === 'returned') && (self || user.role === 'admin'),
@@ -699,7 +701,7 @@ const approverDecide = db.transaction((user, id, input) => {
   const r = getRequest(id);
   if (!r) throw new UserError('Request not found.');
   if (r.status !== 'approver_review') throw new UserError('This request is not awaiting the approver.');
-  if (!canApprove(user, r.submitter_tier)) {
+  if (!canApprove(user, r)) {
     throw new UserError('You cannot approve requests from this submitter.');
   }
   const reasoning = String(input.reasoning || '').trim();

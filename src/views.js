@@ -769,7 +769,7 @@ function account(ctx) {
     <h1>Your account</h1>
     <form method="post" action="/account" class="panel narrow">
       ${csrfField(ctx)}
-      <p>${esc(u.name)}, ${esc(u.email)}, ${esc(ROLE_LABELS[u.role])}, ${esc(TIER_LABELS[u.tier])}</p>
+      <p>${esc(u.name)}, ${esc(u.email)}, ${esc(ROLE_LABELS[u.role])}${u.role === 'submitter' ? ', ' + esc(TIER_LABELS[u.tier]) : ''}</p>
       <div class="field"><label>Time zone</label><div class="hint">Dates and the "must be after today" rule use this.</div>
         <select name="timezone">${tzOptions(u.timezone)}</select></div>
       <div class="field"><label>New password (leave blank to keep, min 10 characters)</label><input name="password" type="password" autocomplete="new-password"></div>
