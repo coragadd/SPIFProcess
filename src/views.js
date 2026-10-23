@@ -1,5 +1,5 @@
 ﻿'use strict';
-const { TYPES, STATUS_LABELS, TIMEZONES, GROUPS, PODS, displayStatus, halfYearLabel, todayIn } = require('./workflow');
+const { TYPES, STATUS_LABELS, TIMEZONES, GROUPS, PODS, displayStatus, halfYearLabel, todayIn, getReps } = require('./workflow');
 
 const esc = (s) =>
   String(s == null ? '' : s)
@@ -131,6 +131,19 @@ function attachmentLinks(files) {
   return (files || []).map((a) => `<a href="/attachments/${a.id}">${esc(a.original_name)}</a>`).join('<br>');
 }
 
+// Rep dropdown grouped by team. repList arrives already ordered by group, so keep first-seen order.
+function repPicker(name, repList, selected, id) {
+  const byGroup = new Map();
+  for (const p of repList) byGroup.set(p.group, (byGroup.get(p.group) || []).concat(p));
+  const opt = (n) => `<option value="${esc(n)}"${n === selected ? ' selected' : ''}>${esc(n)}</option>`;
+  const groups = [...byGroup].map(
+    ([group, list]) => `<optgroup label="${esc(group)}">${list.map((p) => opt(p.name)).join('')}</optgroup>`
+  );
+  // Keep a name that was saved earlier but is not on the list, so editing does not drop it.
+  const orphan = selected && !repList.some((p) => p.name === selected) ? `<optgroup label="Not on rep list">${opt(selected)}</optgroup>` : '';
+  return `<select name="${name}"${id ? ` id="${id}"` : ''}><option value="">Select a rep...</option>${groups.join('')}${orphan}</select>`;
+}
+
 function participantsFields(values, errors, label) {
   const group = values.participants_group || '';
   let picked = [].concat(values.participants_pods || []).map(String);
@@ -202,7 +215,7 @@ function requestChooser(ctx) {
     <nav class="options">
       <a class="card" href="/requests/new?type=new_spif"><h2>New SPIF</h2><p>A SPIF that has not run before.</p></a>
       <a class="card" href="/saved"><h2>Recurring SPIF</h2><p>Pick a saved SPIF and resubmit it with new dates.</p></a>
-      <a class="card" href="/requests/new?type=bonus"><h2>Bonus</h2><p>A flat or per-transaction bonus.</p></a>
+      <a class="card" href="/requests/new?type=bonus"><h2>Bonus</h2><p>A regular bonus, or the monthly MBO (no approval needed).</p></a>
       <a class="card" href="/requests/new?type=adjustment"><h2>Adjustment</h2><p>A commission adjustment, on a deal, a component, or neither.</p></a>
     </nav>`
   );
@@ -281,6 +294,30 @@ function requestForm(ctx, o) {
       hint: 'Think of one-off cases that may require exceptions, and say how each would be handled.',
     })}`;
 
+  // Bonuses: choose regular or the monthly MBO. A regular bonus is a normal request plus the
+  // commission plan question; the MBO is a short form that skips approval.
+  const regularRecurring = type === 'recurring_spif' && values.bonus_kind === 'regular';
+  const isMbo = type === 'bonus' && values.bonus_kind === 'mbo';
+  const commissionPlan =
+    type === 'bonus' || regularRecurring
+      ? select('commission_plan', 'Does this need to be written into the commission plan?', values, errors, [['yes', 'Yes'], ['no', 'No']])
+      : '';
+  const bonusKindFields =
+    type === 'bonus'
+      ? `${select('bonus_kind', 'Bonus type', values, errors, [['regular', 'Regular bonus'], ['mbo', 'Monthly MBO']], {
+          hint: 'A monthly MBO needs no approval. A regular bonus goes through finance and approval.',
+        })}
+      <div data-bonus-group="mbo"${isMbo ? '' : ' hidden'}>
+        <div class="flash info">The monthly MBO is approved when you submit it. Choose the rep, the amount and the month.</div>
+        <div class="field${errors.mbo_rep ? ' has-error' : ''}"><label for="mbo_rep">Rep</label>${repPicker('mbo_rep', o.reps || getReps(), values.mbo_rep, 'mbo_rep')}${errors.mbo_rep ? `<div class="err">${esc(errors.mbo_rep)}</div>` : ''}</div>
+        ${input('mbo_amount', 'Amount ($)', values, errors, { type: 'number', step: '0.01' })}
+        ${input('mbo_month', 'Month', values, errors, { type: 'month' })}
+        ${textarea('mbo_description', 'Description (optional)', values, errors, { rows: 3 })}
+      </div>`
+      : regularRecurring
+      ? '<input type="hidden" name="bonus_kind" value="regular">'
+      : '';
+
   return page(
     ctx,
     TYPES[type],
@@ -289,8 +326,12 @@ function requestForm(ctx, o) {
     ${errorList}
     <form method="post" action="${esc(action)}" class="panel" enctype="multipart/form-data">
       ${hidden}
-      ${common}
-      ${isAdj ? adjFields : spifFields}
+      ${bonusKindFields}
+      <div data-bonus-group="regular"${type === 'bonus' && values.bonus_kind !== 'regular' ? ' hidden' : ''}>
+        ${common}
+        ${isAdj ? adjFields : spifFields}
+        ${commissionPlan}
+      </div>
       <button class="btn">${esc(submitLabel)}</button>
     </form>`
   );
@@ -301,6 +342,15 @@ function termsTable(data, type, files) {
   const add = (label, val) => {
     if (val !== '' && val != null) rows.push(`<tr><th>${esc(label)}</th><td class="pre">${esc(val)}</td></tr>`);
   };
+  if (data.bonus_kind === 'mbo') {
+    add('Bonus type', 'Monthly MBO (no approval needed)');
+    add('Rep', data.mbo_rep);
+    add('Amount', money(data.mbo_amount));
+    add('Month', data.mbo_month);
+    add('Description', data.description);
+    return `<table class="kv">${rows.join('')}</table>`;
+  }
+  if (data.bonus_kind === 'regular') add('Bonus type', 'Regular bonus');
   add('Participants', data.participants);
   add('Description', data.description);
   if (type === 'adjustment') {
@@ -318,6 +368,7 @@ function termsTable(data, type, files) {
       add('Rate', data.payout_rate === '' ? '' : money(data.payout_rate) + ' per unit of the KPI');
     }
     add('Amounts calculated by', CALCULATOR_LABELS[data.calculated_by]);
+    if (data.bonus_kind === 'regular') add('Written into the commission plan', data.commission_plan === 'yes' ? 'Yes' : 'No');
   }
   add('Payout amounts', data.amounts);
   add('Estimated total spend', money(data.estimated_spend));
@@ -380,18 +431,7 @@ function requestDetail(ctx, o) {
   const { r, data, versions, steps, actions, auditRows, results } = o;
   const repAmounts = o.repAmounts || [];
   const repList = o.reps || [];
-  const repSelect = (selected) => {
-    // repList arrives already ordered by group, so keep first-seen order.
-    const byGroup = new Map();
-    for (const p of repList) byGroup.set(p.group, (byGroup.get(p.group) || []).concat(p));
-    const opt = (n) => `<option value="${esc(n)}"${n === selected ? ' selected' : ''}>${esc(n)}</option>`;
-    const groups = [...byGroup].map(
-      ([group, list]) => `<optgroup label="${esc(group)}">${list.map((p) => opt(p.name)).join('')}</optgroup>`
-    );
-    // Keep a name that was saved earlier but is not on the list, so editing does not drop it.
-    const orphan = selected && !repList.some((p) => p.name === selected) ? `<optgroup label="Not on rep list">${opt(selected)}</optgroup>` : '';
-    return `<select name="rep_name"><option value="">Select a rep...</option>${groups.join('')}${orphan}</select>`;
-  };
+  const repSelect = (selected) => repPicker('rep_name', repList, selected);
   const repTotal = repAmounts.reduce((sum, x) => sum + x.amount, 0);
   const repRow = (x) => `<tr class="rep-row">
         <td>${repSelect(x.rep_name)}</td>

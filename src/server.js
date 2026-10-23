@@ -345,6 +345,13 @@ app.post(
           })
         );
       }
+      if (data.bonus_kind === 'mbo') {
+        removeTempFiles(req);
+        const mboId = wf.createMbo(req.user, data);
+        notifyRequest(req, mboId);
+        flash(req, 'success', 'Monthly MBO recorded. It does not need approval.');
+        return res.redirect('/requests/' + mboId);
+      }
       const id = wf.createRequest(req.user, type, data, saved ? saved.standing : null, uploaded, kept);
       notifyRequest(req, id);
       flash(req, 'success', 'Request submitted.');

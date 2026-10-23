@@ -53,6 +53,11 @@ const TERM_FIELDS = [
   'payout_kpi',
   'payout_rate',
   'calculated_by',
+  'bonus_kind',
+  'commission_plan',
+  'mbo_rep',
+  'mbo_amount',
+  'mbo_month',
   'amounts',
   'estimated_spend',
   'eligibility',
@@ -181,6 +186,36 @@ function afterFinance(submitterTier) {
 
 // ---------------------------------------------------------------- validation
 
+// The monthly MBO: one rep, one amount, one month, optional description. No approvals.
+function validateMbo(input, user) {
+  const errors = {};
+  const s = (k) => (input[k] == null ? '' : String(input[k]).replace(/\r\n/g, '\n').trim());
+  const rep = getReps().find((x) => x.name.toLowerCase() === s('mbo_rep').toLowerCase());
+  if (!rep) errors.mbo_rep = 'Choose a rep from the list.';
+  const amount = parseMoney(s('mbo_amount'));
+  if (amount == null || amount <= 0) errors.mbo_amount = 'Enter an amount greater than 0.';
+  const month = s('mbo_month');
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) errors.mbo_month = 'Choose the month.';
+  const repName = rep ? rep.name : s('mbo_rep');
+  const d = {
+    bonus_kind: 'mbo',
+    name: `MBO ${repName} ${month}`,
+    participants: 'Individual: ' + repName,
+    participants_group: 'Individual',
+    participants_pods: [],
+    participants_individual: repName,
+    description: s('mbo_description'),
+    mbo_rep: repName,
+    mbo_amount: amount == null ? '' : amount,
+    mbo_month: month,
+    estimated_spend: amount == null ? '' : amount,
+  };
+  for (const k of TERM_FIELDS) if (!(k in d)) d[k] = '';
+  for (const k of DATE_FIELDS) d[k] = '';
+  d.participants_pods = [];
+  return { errors, data: d };
+}
+
 function validate(type, input, user, opts) {
   const { excludeId = null, fixedName = null } = opts || {};
   const errors = {};
@@ -193,6 +228,16 @@ function validate(type, input, user, opts) {
   };
 
   const isAdj = type === 'adjustment';
+
+  // Bonuses are either regular (full review) or the monthly MBO (no review, its own short form).
+  // A recurring resubmission of a regular bonus carries bonus_kind over from the saved terms.
+  const kind = type === 'bonus' || type === 'recurring_spif' ? s('bonus_kind') : '';
+  if (type === 'bonus' && kind === 'mbo') return validateMbo(input, user);
+  d.bonus_kind = kind === 'regular' ? 'regular' : '';
+  if (type === 'bonus' && !d.bonus_kind) errors.bonus_kind = 'Choose regular bonus or monthly MBO.';
+  const regularBonus = d.bonus_kind === 'regular';
+  for (const k of ['mbo_rep', 'mbo_amount', 'mbo_month']) d[k] = '';
+  d.commission_plan = '';
 
   d.name = fixedName || s('name');
   if (!d.name) errors.name = 'Name is required.';
@@ -289,6 +334,11 @@ function validate(type, input, user, opts) {
   // Edge cases are optional.
   d.edge_cases = s('edge_cases');
 
+  if (regularBonus) {
+    d.commission_plan = s('commission_plan');
+    if (!['yes', 'no'].includes(d.commission_plan)) errors.commission_plan = 'Answer whether this needs to be written into the commission plan.';
+  }
+
   const tz = user.timezone || 'America/New_York';
   const today = todayIn(tz);
 
@@ -303,7 +353,13 @@ function validate(type, input, user, opts) {
 
   if (!validDate(d.end_date)) errors.end_date = 'An end date is required. No perpetual SPIFs.';
   else if (validDate(d.start_date) && d.end_date < d.start_date) errors.end_date = 'End date cannot be before the start date.';
-  else if (validDate(d.start_date) && d.end_date.slice(0, 7) !== d.start_date.slice(0, 7)) {
+  else if (regularBonus) {
+    // A regular bonus can span months but must end by the end of the half year it starts in.
+    const cap = validDate(d.start_date) ? halfYearEnd(d.start_date) : null;
+    if (cap && d.end_date > cap) {
+      errors.end_date = `End date must be on or before ${halfYearLabel(cap)}, ${cap.slice(0, 4)}, the end of the half year the bonus starts in.`;
+    }
+  } else if (validDate(d.start_date) && d.end_date.slice(0, 7) !== d.start_date.slice(0, 7)) {
     errors.end_date = 'End date must be in the same month as the start date. Resubmit for the next month.';
   }
 
@@ -400,7 +456,10 @@ function availableActions(user, r, data) {
 function canEditRepAmounts(user, r) {
   if (['cancelled', 'rejected'].includes(r.status)) return false;
   if (user.role === 'admin') return true;
-  return r.submitter_id === user.id && currentData(r).calculated_by !== 'commissions';
+  const data = currentData(r);
+  // An MBO skips approval, so its amount is fixed at submission; only an admin can change it.
+  if (data.bonus_kind === 'mbo') return false;
+  return r.submitter_id === user.id && data.calculated_by !== 'commissions';
 }
 
 // Rep picklist: these groups, in this order. Anyone whose POD is not listed (leadership,
@@ -579,6 +638,7 @@ function recurringSources(user) {
     const key = r.name.toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);
+    if (JSON.parse(r.data_json).bonus_kind === 'mbo') continue;
     const standing = standingFor(r.name);
     if (standing && !standing.active) continue;
     out.push({ ...r, data: JSON.parse(r.data_json), standing: standing && standing.approved_through ? standing : null });
@@ -637,6 +697,35 @@ const createRequest = db.transaction((user, type, data, saved, uploaded, carried
     });
     audit(null, 'request.auto_approved_steps', 'request', id, id, { savedSpifId: saved.id, status: 'approved' });
   }
+  return id;
+});
+
+// The monthly MBO is approved on submission: finance and approver steps are recorded as skipped,
+// and the rep's amount goes straight into the rep amounts.
+const createMbo = db.transaction((user, data) => {
+  const base = data.name;
+  let name = base;
+  for (let n = 2; db.prepare('SELECT 1 FROM requests WHERE name = ?').get(name); n++) name = `${base} (${n})`;
+  data.name = name;
+  const info = db
+    .prepare(`INSERT INTO requests (type, name, submitter_id, status, approval_scope) VALUES ('bonus', ?, ?, 'approved', 'once')`)
+    .run(name, user.id);
+  const id = Number(info.lastInsertRowid);
+  db.prepare(
+    'INSERT INTO request_versions (request_id, version, data_json, terms_hash, created_by) VALUES (?, 1, ?, ?, ?)'
+  ).run(id, JSON.stringify(data), hashTerms(data, []), user.id);
+  audit(user, 'request.submitted', 'request', id, id, { type: 'bonus', kind: 'mbo', name, version: 1 });
+  const note = 'Monthly MBO does not need approval';
+  addStep(id, 1, 'finance', 'skipped', note, 'monthly MBO', null);
+  addStep(id, 1, 'approver', 'skipped', note, 'monthly MBO', null);
+  db.prepare('INSERT INTO rep_amounts (request_id, rep_name, amount, note, updated_by) VALUES (?, ?, ?, ?, ?)').run(
+    id,
+    data.mbo_rep,
+    data.mbo_amount,
+    null,
+    user.id
+  );
+  audit(null, 'request.auto_approved_steps', 'request', id, id, { kind: 'mbo', status: 'approved' });
   return id;
 });
 
@@ -799,7 +888,7 @@ function reportData(user, year) {
     .filter((r) => canView(user, r))
     .map((r) => {
       const data = JSON.parse(r.data_json);
-      const month = (data.start_date || r.created_at.slice(0, 10)).slice(0, 7);
+      const month = (data.start_date || data.mbo_month || r.created_at.slice(0, 10)).slice(0, 7);
       const estimated = Number(data.estimated_spend) || 0;
       const actual = r.actual_spend == null ? null : r.actual_spend;
       return {
@@ -879,6 +968,7 @@ module.exports = {
   displayStatus,
   isApprover,
   createRequest,
+  createMbo,
   resubmitRequest,
   financeDecide,
   approverDecide,

@@ -19,11 +19,13 @@
       // End date: on or after the start date and within the same month.
       var start = form.querySelector('[name=start_date]');
       var end = form.querySelector('[name=end_date]');
+      var bonusKind = form.querySelector('[name=bonus_kind]');
       if (start && end) {
         var syncDates = function () {
           if (start.value) {
             end.min = start.value;
-            end.max = lastDayOf(start.value);
+            // Regular bonuses can span months but end by June 30 or December 31.
+            end.max = bonusKind ? start.value.slice(0, 4) + (Number(start.value.slice(5, 7)) <= 6 ? '-06-30' : '-12-31') : lastDayOf(start.value);
           } else {
             end.removeAttribute('min');
             end.removeAttribute('max');
@@ -68,6 +70,17 @@
         }
       }
     })(forms[i]);
+  }
+
+  // Bonus: show the regular-bonus fields or the monthly MBO fields, whichever is chosen.
+  var kindSelect = document.querySelector('select[name=bonus_kind]');
+  if (kindSelect) {
+    var kindGroups = document.querySelectorAll('[data-bonus-group]');
+    var syncKind = function () {
+      for (var k = 0; k < kindGroups.length; k++) kindGroups[k].hidden = kindGroups[k].getAttribute('data-bonus-group') !== kindSelect.value;
+    };
+    kindSelect.addEventListener('change', syncKind);
+    syncKind();
   }
 
   // Payout type: show only the fields for the chosen type; tier 3 only when 3 tiers are picked.
