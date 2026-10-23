@@ -177,6 +177,15 @@ function addColumnIfMissing(table, column, type) {
 }
 addColumnIfMissing('saved_spifs', 'source_request_id', 'INTEGER');
 addColumnIfMissing('saved_spifs', 'source_version', 'INTEGER');
+// A saved_spifs row is now a standing half-year approval: terms unchanged and ending on or before
+// approved_through (June 30 or December 31) skip review when resubmitted.
+addColumnIfMissing('saved_spifs', 'approved_through', 'TEXT');
+// The concern finance reported, shown to the approver and the submitter. approval_through is the
+// date a half-year approval runs to.
+addColumnIfMissing('requests', 'finance_concern', 'TEXT');
+addColumnIfMissing('requests', 'approval_through', 'TEXT');
+// Slack member ID (starts with U or W) used for direct-message notifications.
+addColumnIfMissing('users', 'slack_id', 'TEXT');
 
 // Tiers: 1 and 2 can both request and approve (tier 1 needs only finance, tier 2 needs a tier 1
 // approver); tier 3 can only request (needs a tier 1 or 2 approver). Everyone defaults to tier 3.

@@ -10,7 +10,7 @@ const multer = require('multer');
 const { db, audit, seedAdmin, dataDir, uploadDir } = require('./db');
 const wf = require('./workflow');
 const views = require('./views');
-const { notifyFinance } = require('./notify');
+const { notifyRequest, notifyRepAmounts } = require('./notify');
 
 const { UserError } = wf;
 
@@ -199,12 +199,6 @@ function tooManyAttempts(key) {
   return rec.length >= 10;
 }
 
-function savedFor(user, id) {
-  const s = db.prepare('SELECT * FROM saved_spifs WHERE id = ? AND active = 1').get(Number(id));
-  const privileged = ['admin', 'finance'].includes(user.role) || wf.isApprover(user);
-  if (!s || (!privileged && s.owner_id !== user.id)) throw new UserError('Saved SPIF not found.');
-  return s;
-}
 
 // ---------------------------------------------------------------- auth
 
@@ -287,8 +281,8 @@ app.get(
     let existingFiles = [];
     if (type === 'recurring_spif') {
       if (!req.query.saved) return res.redirect('/saved');
-      const s = savedFor(req.user, req.query.saved);
-      values = { ...JSON.parse(s.terms_json), name: s.name };
+      const s = wf.recurringSource(req.user, req.query.saved);
+      values = { ...s.data, name: s.name };
       savedId = s.id;
       lockName = true;
       existingFiles = savedAttachments(s);
@@ -309,9 +303,9 @@ app.get(
   })
 );
 
-// Attachments that belong to a saved SPIF's approved terms.
-function savedAttachments(saved) {
-  return wf.attachmentsFor(saved.source_request_id, saved.source_version);
+// Attachments that belong to the terms being resubmitted (the source request's current version).
+function savedAttachments(source) {
+  return wf.attachmentsFor(source.id, source.current_version);
 }
 
 app.post(
@@ -324,14 +318,13 @@ app.post(
       let saved = null;
       let existing = [];
       if (type === 'recurring_spif') {
-        saved = savedFor(req.user, req.body.saved_id);
+        saved = wf.recurringSource(req.user, req.body.saved_id);
         existing = savedAttachments(saved);
       }
       const kept = keptRows(req, existing);
       const uploaded = uploadedRecords(req);
       const { errors, data } = wf.validate(type, req.body, req.user, {
         fixedName: saved ? saved.name : null,
-        fileCount: kept.length + uploaded.length,
       });
       if (Object.keys(errors).length) {
         removeTempFiles(req);
@@ -352,8 +345,8 @@ app.post(
           })
         );
       }
-      const id = wf.createRequest(req.user, type, data, saved, uploaded, kept);
-      notifyFinance(req, id);
+      const id = wf.createRequest(req.user, type, data, saved ? saved.standing : null, uploaded, kept);
+      notifyRequest(req, id);
       flash(req, 'success', 'Request submitted.');
       res.redirect('/requests/' + id);
     } catch (e) {
@@ -441,7 +434,6 @@ app.post(
       const { errors, data } = wf.validate(r.type, req.body, req.user, {
         excludeId: r.id,
         fixedName: r.type === 'recurring_spif' ? r.name : null,
-        fileCount: kept.length + uploaded.length,
       });
       if (Object.keys(errors).length) {
         removeTempFiles(req);
@@ -461,7 +453,7 @@ app.post(
         );
       }
       wf.resubmitRequest(req.user, r.id, data, uploaded, kept);
-      notifyFinance(req, r.id);
+      notifyRequest(req, r.id);
       flash(req, 'success', 'Resubmitted for approval.');
       res.redirect('/requests/' + r.id);
     } catch (e) {
@@ -484,60 +476,61 @@ app.get(
   })
 );
 
-const actionRoute = (name, fn, okMsg) =>
+// after(req, requestId, result) runs once the action succeeded (used for Slack notifications).
+const actionRoute = (name, fn, okMsg, after) =>
   app.post(
     `/requests/:id/${name}`,
     wrap((req, res) => {
       const r = loadVisible(req, res);
       if (!r) return;
-      fn(req.user, r.id, req.body);
+      const result = fn(req.user, r.id, req.body);
+      if (after) after(req, r.id, result);
       flash(req, 'success', okMsg);
       res.redirect('/requests/' + r.id);
     })
   );
 
-actionRoute('finance', wf.financeDecide, 'Finance decision recorded.');
-actionRoute('approver', wf.approverDecide, 'Approver decision recorded.');
-actionRoute('skip', wf.adminSkip, 'Step skipped and logged.');
+actionRoute('finance', wf.financeDecide, 'Finance decision recorded.', notifyRequest);
+actionRoute('approver', wf.approverDecide, 'Approver decision recorded.', notifyRequest);
+actionRoute('skip', wf.adminSkip, 'Step skipped and logged.', notifyRequest);
 actionRoute('cancel', wf.cancelRequest, 'Request cancelled.');
 actionRoute('results', wf.submitResults, 'Results submitted. The request is finalized.');
-actionRoute('rep-amounts', wf.saveRepAmounts, 'Rep amounts saved.');
+actionRoute('rep-amounts', wf.saveRepAmounts, 'Rep amounts saved.', (req, id, changed) => {
+  if (changed) notifyRepAmounts(req, id, req.user);
+});
 
 // ---------------------------------------------------------------- saved recurring SPIFs
 
 app.get(
   '/saved',
   wrap((req, res) => {
-    const privileged = ['admin', 'finance'].includes(req.user.role) || wf.isApprover(req.user);
-    const rows = privileged
-      ? db.prepare('SELECT * FROM saved_spifs WHERE active = 1 ORDER BY name').all()
-      : db.prepare('SELECT * FROM saved_spifs WHERE active = 1 AND owner_id = ? ORDER BY name').all(req.user.id);
-    res.send(views.savedList(ctx(req), rows));
+    res.send(views.savedList(ctx(req), wf.recurringSources(req.user)));
   })
 );
 
+// :id is the request being resubmitted (the newest approved request for that SPIF name).
 app.post(
   '/saved/:id/resubmit',
   wrap((req, res) => {
-    const s = savedFor(req.user, req.params.id);
-    const input = { ...JSON.parse(s.terms_json), name: s.name };
-    for (const k of ['start_date', 'end_date', 'announce_date', 'announce_method']) input[k] = req.body[k];
+    const s = wf.recurringSource(req.user, req.params.id);
+    // Everything is prefilled from the previous run; the submitter only supplies the new dates.
+    const input = { ...s.data, name: s.name };
+    for (const k of ['start_date', 'end_date']) input[k] = req.body[k];
     // Documents attached to the approved terms carry over unchanged.
     const carried = savedAttachments(s);
-    const { errors, data } = wf.validate('recurring_spif', input, req.user, {
-      fixedName: s.name,
-      fileCount: carried.length,
-    });
-    if (Object.keys(errors).length) throw new UserError(Object.values(errors).join(' '));
-    const id = wf.createRequest(req.user, 'recurring_spif', data, s, [], carried);
+    const { errors, data } = wf.validate('recurring_spif', input, req.user, { fixedName: s.name });
+    if (Object.keys(errors).length) {
+      throw new UserError(Object.values(errors).join(' ') + ' Use "Resubmit with changes" to update the terms.');
+    }
+    const id = wf.createRequest(req.user, 'recurring_spif', data, s.standing, [], carried);
     const row = wf.getRequest(id);
-    notifyFinance(req, id);
+    notifyRequest(req, id);
     flash(
       req,
       'success',
       row.status === 'approved'
-        ? 'Resubmitted. Terms are unchanged from the indefinite approval, so approval steps were skipped.'
-        : 'Resubmitted. It goes through full review because it was not unchanged from an indefinite approval.'
+        ? `Resubmitted. Terms are unchanged and covered by the approval through ${wf.halfYearLabel(row.approval_through)}, so review was skipped.`
+        : 'Resubmitted. It goes through approval again.'
     );
     res.redirect('/requests/' + id);
   })
@@ -547,10 +540,16 @@ app.post(
   '/saved/:id/revoke',
   requireRole('admin'),
   wrap((req, res) => {
-    const s = savedFor(req.user, req.params.id);
-    db.prepare('UPDATE saved_spifs SET approved_indefinitely = 0, active = 0 WHERE id = ?').run(s.id);
-    audit(req.user, 'saved_spif.revoked', 'saved_spif', s.id, null, { name: s.name });
-    flash(req, 'success', `${s.name} was deactivated and its indefinite approval revoked.`);
+    const s = wf.recurringSource(req.user, req.params.id);
+    if (!s.standing) throw new UserError('This SPIF has no half-year approval to revoke.');
+    db.prepare('UPDATE saved_spifs SET approved_indefinitely = 0, approved_through = NULL, active = 0 WHERE id = ?').run(
+      s.standing.id
+    );
+    audit(req.user, 'saved_spif.revoked', 'saved_spif', s.standing.id, null, {
+      name: s.name,
+      through: s.standing.approved_through,
+    });
+    flash(req, 'success', `${s.name} was deactivated and its half-year approval revoked.`);
     res.redirect('/saved');
   })
 );
@@ -596,7 +595,7 @@ app.get(
       views.admin(ctx(req), {
         users: db.prepare('SELECT * FROM users ORDER BY active DESC, name').all(),
         pendingRows: wf.listRequests(req.user).filter((r) => wf.PENDING.includes(r.status)),
-        saved: db.prepare('SELECT id FROM saved_spifs WHERE active = 1').all(),
+        saved: wf.recurringSources(req.user),
       })
     );
   })
@@ -629,7 +628,7 @@ app.get(
       'Owner',
       'Owner email',
       'Active',
-      'Approved indefinitely',
+      'Approved through',
       'Approved by',
       'Approved at',
       'Classification',
@@ -650,7 +649,7 @@ app.get(
           s.owner_name,
           s.owner_email,
           s.active ? 'Yes' : 'No',
-          s.approved_indefinitely ? 'Yes' : 'No',
+          s.approved_through || (s.approved_indefinitely ? 'Indefinitely (old approval)' : ''),
           s.approved_by_name,
           s.approved_at,
           s.classification,
@@ -677,16 +676,21 @@ function cleanUserInput(body) {
   const name = String(body.name || '').trim();
   const email = String(body.email || '').trim().toLowerCase();
   const role = String(body.role || '');
-  const tier = Number(body.tier);
+  // Finance users have no tier field; `tier` is null and callers keep the stored value (3 for new users).
+  const tier = role === 'finance' ? null : Number(body.tier);
   const timezone = String(body.timezone || '');
   const password = String(body.password || '');
+  const slackId = String(body.slack_id || '').trim();
   if (!name) throw new UserError('Name is required.');
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new UserError('Enter a valid email address.');
   if (!ROLES.includes(role)) throw new UserError('Choose a valid role.');
-  if (![1, 2, 3].includes(tier)) throw new UserError('Choose a tier.');
+  if (role !== 'finance' && ![1, 2, 3].includes(tier)) throw new UserError('Choose a tier.');
   if (!wf.isValidTz(timezone)) throw new UserError('Choose a valid time zone.');
   if (password && password.length < 10) throw new UserError('Passwords need at least 10 characters.');
-  return { name, email, role, tier, timezone, password };
+  if (slackId && !/^[UW][A-Z0-9]{6,}$/.test(slackId)) {
+    throw new UserError('Slack member ID looks like U01ABCDE234. Find it in Slack under Profile, More, Copy member ID.');
+  }
+  return { name, email, role, tier, timezone, password, slackId: slackId || null };
 }
 
 function constraintToUserError(e) {
@@ -700,11 +704,12 @@ app.post(
   wrap((req, res) => {
     const u = cleanUserInput(req.body);
     if (!u.password) throw new UserError('A temporary password is required.');
+    const tier = u.tier || 3;
     try {
       const info = db
-        .prepare('INSERT INTO users (name, email, password_hash, role, tier, timezone) VALUES (?, ?, ?, ?, ?, ?)')
-        .run(u.name, u.email, bcrypt.hashSync(u.password, 10), u.role, u.tier, u.timezone);
-      audit(req.user, 'user.created', 'user', info.lastInsertRowid, null, { email: u.email, role: u.role, tier: u.tier });
+        .prepare('INSERT INTO users (name, email, password_hash, role, tier, timezone, slack_id) VALUES (?, ?, ?, ?, ?, ?, ?)')
+        .run(u.name, u.email, bcrypt.hashSync(u.password, 10), u.role, tier, u.timezone, u.slackId);
+      audit(req.user, 'user.created', 'user', info.lastInsertRowid, null, { email: u.email, role: u.role, tier });
     } catch (e) {
       throw constraintToUserError(e);
     }
@@ -725,13 +730,15 @@ app.post(
     if (id === req.user.id && (!active || u.role !== 'admin')) {
       throw new UserError('You cannot deactivate or demote yourself.');
     }
+    const tier = u.tier || before.tier;
     try {
-      db.prepare('UPDATE users SET name = ?, email = ?, role = ?, tier = ?, timezone = ?, active = ? WHERE id = ?').run(
+      db.prepare('UPDATE users SET name = ?, email = ?, role = ?, tier = ?, timezone = ?, slack_id = ?, active = ? WHERE id = ?').run(
         u.name,
         u.email,
         u.role,
-        u.tier,
+        tier,
         u.timezone,
+        u.slackId,
         active,
         id
       );
@@ -740,8 +747,8 @@ app.post(
       throw constraintToUserError(e);
     }
     audit(req.user, 'user.updated', 'user', id, null, {
-      before: { name: before.name, email: before.email, role: before.role, tier: before.tier, active: before.active, timezone: before.timezone },
-      after: { name: u.name, email: u.email, role: u.role, tier: u.tier, active, timezone: u.timezone },
+      before: { name: before.name, email: before.email, role: before.role, tier: before.tier, active: before.active, timezone: before.timezone, slack_id: before.slack_id },
+      after: { name: u.name, email: u.email, role: u.role, tier, active, timezone: u.timezone, slack_id: u.slackId },
       passwordChanged: !!u.password,
     });
     flash(req, 'success', `Saved ${u.name}.`);

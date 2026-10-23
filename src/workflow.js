@@ -38,7 +38,8 @@ const TIMEZONES = [
   'UTC',
 ];
 
-// Fields that define "how it works". Changing any of these voids an indefinite approval.
+// Fields that define "how it works". Changing any of these voids a half-year approval.
+// 'amounts' is still used by adjustments and by requests submitted before payout types existed.
 const TERM_FIELDS = [
   'participants',
   'participants_group',
@@ -46,6 +47,14 @@ const TERM_FIELDS = [
   'participants_individual',
   'description',
   'payout_structure',
+  'payout_flat',
+  'payout_tier_count',
+  'payout_tier_1',
+  'payout_tier_2',
+  'payout_tier_3',
+  'payout_kpi',
+  'payout_rate',
+  'calculated_by',
   'amounts',
   'estimated_spend',
   'eligibility',
@@ -66,6 +75,18 @@ const GROUPS = [
   'Individual',
 ];
 const PODS = ['All PODs', 'Red', 'Blue', 'Green', 'Black'];
+
+const PAYOUT_TYPES = ['flat', 'tiered', 'calculated'];
+const CALCULATORS = ['submitter', 'commissions'];
+const PAYOUT_FIELDS = [
+  'payout_flat',
+  'payout_tier_count',
+  'payout_tier_1',
+  'payout_tier_2',
+  'payout_tier_3',
+  'payout_kpi',
+  'payout_rate',
+];
 
 const DATE_FIELDS =['start_date', 'end_date', 'announce_date', 'announce_method'];
 
@@ -134,6 +155,15 @@ function parseMoney(v) {
   return isNaN(n) ? null : n;
 }
 
+// A half-year approval runs to June 30 when given January through June, December 31 otherwise.
+function halfYearEnd(today) {
+  return Number(today.slice(5, 7)) <= 6 ? `${today.slice(0, 4)}-06-30` : `${today.slice(0, 4)}-12-31`;
+}
+
+function halfYearLabel(date) {
+  return date.endsWith('-06-30') ? 'June 30' : 'December 31';
+}
+
 // Tiers 1 and 2 can approve; a user can approve only requests from a strictly higher tier number
 // (tier 1 approves tier 2 and 3, tier 2 approves tier 3). Tier 3 cannot approve.
 function isApprover(user) {
@@ -196,13 +226,14 @@ function validate(type, input, user, opts) {
       ? 'Individual: ' + d.participants_individual
       : d.participants_group + (d.participants_pods.length ? ' (' + d.participants_pods.join(', ') + ')' : '');
 
-  need('amounts', 'Amounts');
-
   const spend = parseMoney(s('estimated_spend'));
   if (spend == null || spend < 0) errors.estimated_spend = 'Enter the estimated total spend as a number.';
   d.estimated_spend = spend == null ? '' : spend;
 
   if (isAdj) {
+    need('amounts', 'Payout amount');
+    for (const k of PAYOUT_FIELDS) d[k] = '';
+    d.calculated_by = '';
     need('description', 'Description', 20);
     // Adjustments may relate to a deal, a component, or nothing at all.
     d.deal = s('deal');
@@ -217,14 +248,42 @@ function validate(type, input, user, opts) {
   }
 
   need('description', 'Description of how it works', 50);
+  d.amounts = '';
+  for (const k of PAYOUT_FIELDS) d[k] = '';
+  // Only the fields for the chosen payout type are kept.
+  const payoutAmount = (k, label) => {
+    const n = parseMoney(s(k));
+    if (n == null || n <= 0) {
+      errors[k] = `${label} must be a number greater than 0.`;
+      return '';
+    }
+    return n;
+  };
   d.payout_structure = s('payout_structure');
-  if (!['flat_rate', 'calculated'].includes(d.payout_structure)) errors.payout_structure = 'Choose a payout structure.';
-  // Rules can be typed, attached as a document, or both.
-  d.eligibility = s('eligibility');
-  if (!d.eligibility && !(opts && opts.fileCount > 0)) {
-    errors.eligibility = 'Describe the eligibility and measurement rules, or attach a document.';
+  if (d.payout_structure === 'flat') {
+    d.payout_flat = payoutAmount('payout_flat', 'Payout amount');
+  } else if (d.payout_structure === 'tiered') {
+    const count = s('payout_tier_count');
+    if (!['2', '3'].includes(count)) {
+      errors.payout_tier_count = 'Choose 2 or 3 tiers. A single amount is a flat payout.';
+    } else {
+      d.payout_tier_count = Number(count);
+      for (let i = 1; i <= d.payout_tier_count; i++) d['payout_tier_' + i] = payoutAmount('payout_tier_' + i, `Tier ${i} payout amount`);
+    }
+  } else if (d.payout_structure === 'calculated') {
+    need('payout_kpi', 'KPI');
+    d.payout_rate = payoutAmount('payout_rate', 'Rate');
+  } else {
+    errors.payout_structure = 'Choose a payout structure.';
   }
-  need('edge_cases', 'Edge cases ("what if X happens?")');
+
+  d.calculated_by = s('calculated_by');
+  if (!CALCULATORS.includes(d.calculated_by)) errors.calculated_by = 'Choose who will calculate the payout amounts.';
+
+  // Required, and typed in the form: an attached document does not replace it.
+  need('eligibility', 'Eligibility and measurement rules');
+  // Edge cases are optional.
+  d.edge_cases = s('edge_cases');
 
   const tz = user.timezone || 'America/New_York';
   const today = todayIn(tz);
@@ -321,6 +380,7 @@ function availableActions(user, r, data) {
     finance: r.status === 'finance_review' && ['finance', 'admin'].includes(user.role) && !self,
     approver: r.status === 'approver_review' && canApprove(user, r.submitter_tier),
     skip: pending && user.role === 'admin' && !self,
+    halfYearEnd: halfYearEnd(today),
     cancel: (pending || r.status === 'returned') && (self || user.role === 'admin'),
     edit: r.status === 'returned' && self,
     results:
@@ -330,10 +390,13 @@ function availableActions(user, r, data) {
 
 // ---------------------------------------------------------------- rep amounts
 
-// The submitter and admins can change what each rep will make, including after approval.
+// Admins can change what each rep will make, including after approval. The submitter can too, but
+// only when they chose to calculate the amounts themselves (requests from before that choice
+// existed have no value and stay editable by the submitter).
 function canEditRepAmounts(user, r) {
   if (['cancelled', 'rejected'].includes(r.status)) return false;
-  return user.role === 'admin' || r.submitter_id === user.id;
+  if (user.role === 'admin') return true;
+  return r.submitter_id === user.id && currentData(r).calculated_by !== 'commissions';
 }
 
 // Rep picklist: these groups, in this order. Anyone whose POD is not listed (leadership,
@@ -431,32 +494,38 @@ function setStatus(id, status, extra) {
   db.prepare(
     `UPDATE requests SET status = ?, classification = COALESCE(?, classification),
      classification_reasoning = COALESCE(?, classification_reasoning),
-     approval_scope = COALESCE(?, approval_scope), updated_at = datetime('now') WHERE id = ?`
-  ).run(status, e.classification || null, e.reasoning || null, e.scope || null, id);
+     approval_scope = COALESCE(?, approval_scope), approval_through = COALESCE(?, approval_through),
+     updated_at = datetime('now') WHERE id = ?`
+  ).run(status, e.classification || null, e.reasoning || null, e.scope || null, e.through || null, id);
 }
 
-// An indefinite approval turns the request's terms into a saved recurring SPIF.
-function finalizeApproval(id, actor) {
+// What a user's approve action means: this month only, or through the end of the half year.
+function approvalScopeFor(user, r, wantsHalfYear) {
+  if (!wantsHalfYear) return { scope: 'once', through: null };
+  if (r.type === 'adjustment') throw new UserError('Adjustments can only be approved once.');
+  return { scope: 'half_year', through: halfYearEnd(todayIn(user.timezone || 'America/New_York')) };
+}
+
+// A half-year approval is remembered as a standing approval for this SPIF's name and terms.
+function recordStandingApproval(id, actor) {
   const r = getRequest(id);
-  if (r.status !== 'approved' || r.approval_scope !== 'indefinite') return;
+  if (r.status !== 'approved' || r.approval_scope !== 'half_year') return;
   const data = currentData(r);
   const terms = JSON.stringify(termsOf(data));
   const hash = hashTerms(data, attachmentsFor(r.id, r.current_version));
-  let saved = r.saved_spif_id
-    ? db.prepare('SELECT * FROM saved_spifs WHERE id = ?').get(r.saved_spif_id)
-    : db.prepare('SELECT * FROM saved_spifs WHERE name = ?').get(r.name);
+  let saved = standingFor(r.name);
   if (saved) {
     db.prepare(
       `UPDATE saved_spifs SET terms_json = ?, terms_hash = ?, classification = ?, classification_reasoning = ?,
-       approved_indefinitely = 1, approved_by = ?, approved_at = datetime('now'), active = 1,
+       approved_indefinitely = 0, approved_through = ?, approved_by = ?, approved_at = datetime('now'), active = 1,
        source_request_id = ?, source_version = ? WHERE id = ?`
-    ).run(terms, hash, r.classification, r.classification_reasoning, actor.id, r.id, r.current_version, saved.id);
+    ).run(terms, hash, r.classification, r.classification_reasoning, r.approval_through, actor.id, r.id, r.current_version, saved.id);
   } else {
     const info = db
       .prepare(
         `INSERT INTO saved_spifs (name, owner_id, type, terms_json, terms_hash, classification,
-         classification_reasoning, approved_indefinitely, approved_by, approved_at, source_request_id, source_version)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, datetime('now'), ?, ?)`
+         classification_reasoning, approved_indefinitely, approved_through, approved_by, approved_at, source_request_id, source_version)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, datetime('now'), ?, ?)`
       )
       .run(
         r.name,
@@ -466,6 +535,7 @@ function finalizeApproval(id, actor) {
         hash,
         r.classification,
         r.classification_reasoning,
+        r.approval_through,
         actor.id,
         r.id,
         r.current_version
@@ -473,7 +543,52 @@ function finalizeApproval(id, actor) {
     saved = { id: info.lastInsertRowid };
   }
   db.prepare('UPDATE requests SET saved_spif_id = ? WHERE id = ?').run(saved.id, id);
-  audit(actor, 'saved_spif.approved_indefinitely', 'saved_spif', saved.id, id, { name: r.name });
+  audit(actor, 'saved_spif.approved_half_year', 'saved_spif', saved.id, id, { name: r.name, through: r.approval_through });
+}
+
+function standingFor(name) {
+  return db.prepare('SELECT * FROM saved_spifs WHERE name = ?').get(name);
+}
+
+// ---------------------------------------------------------------- recurring list
+
+const RECURRING_TYPES = ['new_spif', 'recurring_spif', 'bonus'];
+
+// Any approved (or finalized) SPIF can be resubmitted, newest request per name. Submitters see only
+// their own; admin, finance and approvers see everyone's. Deactivated (revoked) names are hidden.
+function recurringSources(user) {
+  const privileged = ['admin', 'finance'].includes(user.role) || isApprover(user);
+  const rows = db
+    .prepare(
+      `SELECT r.*, u.name AS submitter_name, v.data_json
+       FROM requests r
+       JOIN users u ON u.id = r.submitter_id
+       JOIN request_versions v ON v.request_id = r.id AND v.version = r.current_version
+       WHERE r.type IN (${RECURRING_TYPES.map(() => '?').join(',')}) AND r.status IN ('approved', 'finalized')
+       ORDER BY r.id DESC`
+    )
+    .all(...RECURRING_TYPES);
+  const seen = new Set();
+  const out = [];
+  for (const r of rows) {
+    if (!privileged && r.submitter_id !== user.id) continue;
+    const key = r.name.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const standing = standingFor(r.name);
+    if (standing && !standing.active) continue;
+    out.push({ ...r, data: JSON.parse(r.data_json), standing: standing && standing.approved_through ? standing : null });
+  }
+  return out.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+// Takes any request id for the SPIF and resolves to its newest approved run, so a link left open on
+// an older run still works.
+function recurringSource(user, requestId) {
+  const asked = db.prepare('SELECT name FROM requests WHERE id = ?').get(Number(requestId));
+  const found = asked && recurringSources(user).find((s) => s.name.toLowerCase() === asked.name.toLowerCase());
+  if (!found) throw new UserError('That SPIF was not found.');
+  return found;
 }
 
 // carried: attachment rows copied from a saved SPIF; uploaded: newly uploaded file records.
@@ -496,15 +611,25 @@ const createRequest = db.transaction((user, type, data, saved, uploaded, carried
   saveAttachments(user, id, 1, carry, up);
   audit(user, 'request.submitted', 'request', id, id, { type, name: data.name, version: 1 });
 
-  // Terms unchanged from an indefinitely approved SPIF: finance and approver steps are covered.
-  if (type === 'recurring_spif' && saved && saved.approved_indefinitely && saved.terms_hash === hash) {
-    const note = `Terms unchanged from indefinitely approved saved SPIF #${saved.id}`;
+  // Terms unchanged from a half-year approval that still covers the whole run: finance and approver
+  // steps are covered. Everything else (a one-month approval, changed terms, a run past the
+  // approval's end date) goes through full review again.
+  if (
+    type === 'recurring_spif' &&
+    saved &&
+    saved.active &&
+    saved.approved_through &&
+    saved.terms_hash === hash &&
+    data.end_date <= saved.approved_through
+  ) {
+    const note = `Terms unchanged from saved SPIF #${saved.id}, approved through ${saved.approved_through}`;
     addStep(id, 1, 'finance', 'skipped', note, 'inherited classification: ' + (saved.classification || 'none'), null);
-    addStep(id, 1, 'approver', 'skipped', note, 'indefinite approval', null);
+    addStep(id, 1, 'approver', 'skipped', note, 'half-year approval', null);
     setStatus(id, 'approved', {
       classification: saved.classification,
       reasoning: saved.classification_reasoning,
-      scope: 'indefinite',
+      scope: 'half_year',
+      through: saved.approved_through,
     });
     audit(null, 'request.auto_approved_steps', 'request', id, id, { savedSpifId: saved.id, status: 'approved' });
   }
@@ -522,7 +647,8 @@ const resubmitRequest = db.transaction((user, id, data, uploaded, carried) => {
   saveAttachments(user, id, version, carried || [], uploaded || []);
   db.prepare(
     `UPDATE requests SET current_version = ?, name = ?, status = ?, classification = NULL,
-     classification_reasoning = NULL, approval_scope = NULL, updated_at = datetime('now') WHERE id = ?`
+     classification_reasoning = NULL, approval_scope = NULL, approval_through = NULL, finance_concern = NULL,
+     updated_at = datetime('now') WHERE id = ?`
   ).run(version, data.name, 'finance_review', id);
   audit(user, 'request.resubmitted', 'request', id, id, { version });
 });
@@ -536,28 +662,32 @@ const financeDecide = db.transaction((user, id, input) => {
   const reasoning = String(input.reasoning || '').trim();
   const action = input.action;
 
+  // Finance only classifies and passes the request on; it cannot return or reject it. It can flag a
+  // concern, which stays on the request for the approver and the submitter to read.
   if (action === 'classify') {
     if (!['capitalizable', 'expense'].includes(input.classification)) throw new UserError('Choose capitalizable or expense.');
     if (reasoning.length < 10) throw new UserError('Finance reasoning is required (at least 10 characters).');
+    let concern = null;
+    if (input.has_concern) {
+      concern = String(input.concern || '').replace(/\r\n/g, '\n').trim();
+      if (!concern) throw new UserError('Describe the concern, or uncheck "Report a concern".');
+    }
     const next = afterFinance(r.submitter_tier);
     // Tier 1 requests end here, so finance also picks the scope; otherwise the approver does.
-    let scope = null;
-    if (next === 'approved') {
-      scope = input.scope === 'indefinite' ? 'indefinite' : 'once';
-      if (scope === 'indefinite' && r.type === 'adjustment') {
-        throw new UserError('Adjustments cannot be approved indefinitely.');
-      }
-    }
+    const { scope, through } =
+      next === 'approved' ? approvalScopeFor(user, r, input.scope === 'half_year') : { scope: null, through: null };
     addStep(id, r.current_version, 'finance', 'approved', reasoning, input.classification, user.id);
-    setStatus(id, next, { classification: input.classification, reasoning, scope });
-    audit(user, 'finance.classified', 'request', id, id, { classification: input.classification, reasoning, scope, next });
-    finalizeApproval(id, user);
-  } else if (action === 'return') {
-    // Finance cannot reject; it can only send a request back for changes.
-    if (reasoning.length < 10) throw new UserError('A reason is required (at least 10 characters).');
-    addStep(id, r.current_version, 'finance', 'returned', reasoning, null, user.id);
-    setStatus(id, 'returned');
-    audit(user, 'finance.returned', 'request', id, id, { reasoning });
+    setStatus(id, next, { classification: input.classification, reasoning, scope, through });
+    if (concern) db.prepare('UPDATE requests SET finance_concern = ? WHERE id = ?').run(concern, id);
+    audit(user, 'finance.classified', 'request', id, id, {
+      classification: input.classification,
+      reasoning,
+      concern,
+      scope,
+      through,
+      next,
+    });
+    recordStandingApproval(id, user);
   } else {
     throw new UserError('Unknown action.');
   }
@@ -573,15 +703,15 @@ const approverDecide = db.transaction((user, id, input) => {
   const reasoning = String(input.reasoning || '').trim();
   const action = input.action;
 
-  if (action === 'approve_once' || action === 'approve_indefinitely') {
-    if (action === 'approve_indefinitely' && r.type === 'adjustment') {
-      throw new UserError('Adjustments cannot be approved indefinitely.');
-    }
-    const scope = action === 'approve_once' ? 'once' : 'indefinite';
-    addStep(id, r.current_version, 'approver', 'approved', reasoning, scope, user.id);
-    setStatus(id, 'approved', { scope });
-    audit(user, 'approver.approved', 'request', id, id, { scope, reasoning });
-    finalizeApproval(id, user);
+  // One approver is enough: whoever acts first completes the step. If some SPIFs later need both
+  // approvers, count the 'approved' rows in approval_steps for this version here instead of
+  // approving on the first one.
+  if (action === 'approve_once' || action === 'approve_half_year') {
+    const { scope, through } = approvalScopeFor(user, r, action === 'approve_half_year');
+    addStep(id, r.current_version, 'approver', 'approved', reasoning, through ? `${scope} through ${through}` : scope, user.id);
+    setStatus(id, 'approved', { scope, through });
+    audit(user, 'approver.approved', 'request', id, id, { scope, through, reasoning });
+    recordStandingApproval(id, user);
   } else if (action === 'return' || action === 'reject') {
     if (reasoning.length < 10) throw new UserError('A reason is required (at least 10 characters).');
     const decision = action === 'return' ? 'returned' : 'rejected';
@@ -717,7 +847,13 @@ module.exports = {
   TIMEZONES,
   GROUPS,
   PODS,
+  PAYOUT_TYPES,
   TERM_FIELDS,
+  halfYearEnd,
+  halfYearLabel,
+  recurringSources,
+  recurringSource,
+  standingFor,
   termsOf,
   isValidTz,
   todayIn,

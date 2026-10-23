@@ -1,5 +1,5 @@
 'use strict';
-const { TYPES, STATUS_LABELS, TIMEZONES, GROUPS, PODS, displayStatus } = require('./workflow');
+const { TYPES, STATUS_LABELS, TIMEZONES, GROUPS, PODS, displayStatus, halfYearLabel, todayIn } = require('./workflow');
 
 const esc = (s) =>
   String(s == null ? '' : s)
@@ -31,7 +31,14 @@ const TIER_LABELS = {
   2: 'Tier 2 (requests and approves)',
   3: 'Tier 3 (requests only)',
 };
-const PAYOUT_LABELS = { flat_rate: 'Flat Rate', calculated: 'Calculated Amount' };
+// Payout types offered on the form. 'flat_rate' only appears on requests from before these existed.
+const PAYOUT_TYPES = [
+  ['flat', 'Flat payout'],
+  ['tiered', 'Tiered payout'],
+  ['calculated', 'Calculated payout'],
+];
+const PAYOUT_LABELS = { ...Object.fromEntries(PAYOUT_TYPES), flat_rate: 'Flat rate' };
+const CALCULATOR_LABELS = { submitter: 'The submitter', commissions: 'The commissions team' };
 
 const ADJUSTMENT_GUIDE =
   'Adjustment guide: adjustments are treated as expenses by default.';
@@ -111,12 +118,12 @@ function fileField(existing, keptIds, reattach) {
     )
     .join('<br>');
   return `<div class="field">
-    <label for="eligibility_files">Attach a document (optional)</label>
+    <label for="eligibility_files">Attach a supporting document (optional)</label>
     ${kept ? `<div class="hint">Already attached. Uncheck to remove.</div><div>${kept}</div>` : ''}
     <input id="eligibility_files" name="eligibility_files" type="file" multiple accept=".pdf,.doc,.docx,.xls,.xlsx,.csv,.txt,.png,.jpg,.jpeg">
     <div class="hint">${
       reattach ? 'The form had errors, so please attach your file(s) again. ' : ''
-    }PDF, Word, Excel, CSV, text or image. Up to 5 files, 10 MB each. A document can replace typing the rules above.</div>
+    }PDF, Word, Excel, CSV, text or image. Up to 5 files, 10 MB each. It does not replace the eligibility and measurement rules above.</div>
   </div>`;
 }
 
@@ -221,12 +228,39 @@ function requestForm(ctx, o) {
     ${input('deal', 'Deal or component (optional)', values, errors, { hint: 'Leave blank if the adjustment is not tied to a specific deal or component.' })}
     ${select('adjustment_size', 'Adjustment size', values, errors, [['full', 'Full'], ['half', 'Half']])}
     ${textarea('adjustment_reason', 'Reason for the adjustment', values, errors)}
-    ${input('amounts', 'Amount', values, errors, { hint: 'e.g. $450 commission adjustment' })}
+    ${input('amounts', 'Payout amount', values, errors, { hint: 'e.g. $450 commission adjustment' })}
     ${input('estimated_spend', 'Estimated total spend ($)', values, errors, { type: 'number', step: '0.01' })}`;
 
+  const payoutGroup = (key, inner) =>
+    `<div data-payout-group="${key}"${values.payout_structure === key ? '' : ' hidden'}>${inner}</div>`;
+  const tierCount = String(values.payout_tier_count || '');
   const spifFields = `
-    ${select('payout_structure', 'Payout structure', values, errors, Object.entries(PAYOUT_LABELS))}
-    ${textarea('amounts', 'Amounts', values, errors, { hint: 'What is paid, flat rate or calculation method. Include tiers if any.' })}
+    ${values.amounts ? `<div class="flash info"><strong>Previous payout amounts:</strong> <span class="pre">${esc(values.amounts)}</span><br>Enter them in the payout fields below.</div>` : ''}
+    <details class="info">
+      <summary>What do the payout types mean?</summary>
+      <ul>
+        <li><strong>Flat payout:</strong> one amount per winner. Example: $300.</li>
+        <li><strong>Tiered payout:</strong> 2 or 3 tiers, each with its own amount. Example: Tier 1 $500, Tier 2 $200.</li>
+        <li><strong>Calculated payout:</strong> the amount depends on a KPI. Example: KPI = demos attended, rate = $20 per demo.</li>
+      </ul>
+    </details>
+    ${select('payout_structure', 'Payout structure', values, errors, PAYOUT_TYPES)}
+    ${payoutGroup('flat', input('payout_flat', 'Payout amount ($)', values, errors, { type: 'number', step: '0.01' }))}
+    ${payoutGroup(
+      'tiered',
+      `${select('payout_tier_count', 'How many tiers?', values, errors, [['2', '2 tiers'], ['3', '3 tiers']], { hint: 'One tier is a flat payout.' })}
+      ${input('payout_tier_1', 'Tier 1 payout amount ($)', values, errors, { type: 'number', step: '0.01' })}
+      ${input('payout_tier_2', 'Tier 2 payout amount ($)', values, errors, { type: 'number', step: '0.01' })}
+      <div id="tier-3-wrap"${tierCount === '3' ? '' : ' hidden'}>${input('payout_tier_3', 'Tier 3 payout amount ($)', values, errors, { type: 'number', step: '0.01' })}</div>`
+    )}
+    ${payoutGroup(
+      'calculated',
+      `${input('payout_kpi', 'KPI', values, errors, { hint: 'What the payout is based on, e.g. demos attended.' })}
+      ${input('payout_rate', 'Rate ($ per unit of the KPI)', values, errors, { type: 'number', step: '0.01', hint: 'e.g. 20 for $20 per demo.' })}`
+    )}
+    ${select('calculated_by', 'Who will calculate the payout amounts?', values, errors, Object.entries(CALCULATOR_LABELS), {
+      hint: 'If you calculate them, you enter the winners and payout amounts later in Manage Incentives.',
+    })}
     ${input('estimated_spend', 'Estimated total spend ($)', values, errors, { type: 'number', step: '0.01' })}
     <div class="row">
       ${input('start_date', 'Start date', values, errors, { type: 'date' })}
@@ -236,9 +270,9 @@ function requestForm(ctx, o) {
       ${input('announce_date', 'Date announced to the team', values, errors, { type: 'date' })}
       ${input('announce_method', 'How it will be announced', values, errors, { hint: 'e.g. email, all-hands, Slack' })}
     </div>
-    ${textarea('eligibility', 'Eligibility and measurement rules', values, errors, { hint: 'Who qualifies and exactly how results are measured. Type it here, attach a document below, or both.' })}
+    ${textarea('eligibility', 'Eligibility and measurement rules', values, errors, { hint: 'Required. Who qualifies and exactly how the payout is earned and measured.' })}
     ${fileField(existingFiles, keptIds, reattach)}
-    ${textarea('edge_cases', 'Edge cases', values, errors, {
+    ${textarea('edge_cases', 'Edge cases (optional)', values, errors, {
       hint: 'Think of one-off cases that may require exceptions, and say how each would be handled.',
     })}`;
 
@@ -270,8 +304,17 @@ function termsTable(data, type, files) {
     add('Reason', data.adjustment_reason);
   } else {
     add('Payout structure', PAYOUT_LABELS[data.payout_structure] || data.payout_structure);
+    if (data.payout_structure === 'flat') add('Payout amount', money(data.payout_flat));
+    if (data.payout_structure === 'tiered') {
+      for (let i = 1; i <= Number(data.payout_tier_count); i++) add(`Tier ${i} payout amount`, money(data['payout_tier_' + i]));
+    }
+    if (data.payout_structure === 'calculated') {
+      add('KPI', data.payout_kpi);
+      add('Rate', data.payout_rate === '' ? '' : money(data.payout_rate) + ' per unit of the KPI');
+    }
+    add('Amounts calculated by', CALCULATOR_LABELS[data.calculated_by]);
   }
-  add('Amounts', data.amounts);
+  add('Payout amounts', data.amounts);
   add('Estimated total spend', money(data.estimated_spend));
   if (type !== 'adjustment') {
     if (data.start_date) add('Run dates', `${data.start_date} to ${data.end_date}`);
@@ -281,6 +324,14 @@ function termsTable(data, type, files) {
     add('Edge cases', data.edge_cases);
   }
   return `<table class="kv">${rows.join('')}</table>`;
+}
+
+function scopeLabel(r) {
+  if (r.approval_scope === 'once') return 'approved once';
+  if (r.approval_scope === 'half_year') {
+    return r.approval_through ? `approved through ${halfYearLabel(r.approval_through)} (${r.approval_through})` : 'approved through the end of the half year';
+  }
+  return 'approved indefinitely (old approval type)';
 }
 
 function statusBadge(r, data, tz) {
@@ -337,27 +388,32 @@ function requestDetail(ctx, o) {
     return `<select name="rep_name"><option value="">Select a rep...</option>${groups.join('')}${orphan}</select>`;
   };
   const repTotal = repAmounts.reduce((sum, x) => sum + x.amount, 0);
-  const repSection = o.canEditRepAmounts
-    ? `<form method="post" action="/requests/${r.id}/rep-amounts" class="panel">${csrfField(ctx)}
-      <p class="hint">What each rep will make. You can change this at any time, including after approval. Every change is recorded in the activity log. Set a row back to "Select a rep..." and clear its amount to remove it; use a blank row to add a rep.</p>
-      <table class="list"><thead><tr><th>Rep</th><th>Amount ($)</th><th>Note (optional)</th></tr></thead><tbody>
-      ${repAmounts
-        .concat(Array.from({ length: 5 }, () => ({ rep_name: '', amount: '', note: '' })))
-        .map(
-          (x) => `<tr>
+  const repRow = (x) => `<tr class="rep-row">
         <td>${repSelect(x.rep_name)}</td>
         <td><input name="rep_amount" type="number" step="0.01" min="0" value="${esc(x.amount)}"></td>
-        <td><input name="rep_note" value="${esc(x.note || '')}"></td></tr>`
-        )
-        .join('')}</tbody></table>
-      <p>Total: <strong>${esc(money(repTotal))}</strong></p>
+        <td><input name="rep_note" value="${esc(x.note || '')}"></td>
+        <td><button type="button" class="link rep-remove">Remove</button></td></tr>`;
+  const blankRep = { rep_name: '', amount: '', note: '' };
+  const repSection = o.canEditRepAmounts
+    ? `<form method="post" action="/requests/${r.id}/rep-amounts" class="panel" id="rep-form">${csrfField(ctx)}
+      <p class="hint">Winners and what each will make. Add a rep, enter an amount, and save. Remove a row to take that rep off. You can change this at any time, including after approval; every change is recorded in the activity log.</p>
+      <table class="list"><thead><tr><th>Rep</th><th>Amount ($)</th><th>Note (optional)</th><th></th></tr></thead>
+      <tbody id="rep-rows">${(repAmounts.length ? repAmounts : [blankRep]).map(repRow).join('')}</tbody></table>
+      <template id="rep-row-template">${repRow(blankRep)}</template>
+      <p><button type="button" class="btn secondary" id="rep-add">Add rep</button></p>
+      <p id="rep-error" class="err" hidden></p>
+      <p>Total: <strong id="rep-total">${esc(money(repTotal))}</strong></p>
       <button class="btn">Save rep amounts</button>
     </form>`
     : repAmounts.length
     ? `<table class="list"><thead><tr><th>Rep</th><th>Amount</th><th>Note</th></tr></thead><tbody>
       ${repAmounts.map((x) => `<tr><td>${esc(x.rep_name)}</td><td>${esc(money(x.amount))}</td><td>${esc(x.note || '')}</td></tr>`).join('')}
       <tr><th>Total</th><th>${esc(money(repTotal))}</th><th></th></tr></tbody></table>`
-    : '<p class="muted">No rep amounts have been entered.</p>';
+    : `<p class="muted">${
+        data.calculated_by === 'commissions'
+          ? 'The commissions team will enter the winners and payout amounts.'
+          : 'No rep amounts have been entered.'
+      }</p>`;
   const attachments = o.attachments || [];
   const filesFor = (version) => attachments.filter((a) => a.version === version);
   const tz = ctx.user.timezone;
@@ -377,17 +433,22 @@ function requestDetail(ctx, o) {
           <option value="expense"${isAdj ? ' selected' : ''}>Expense</option>
         </select></div>
       ${reasoningBox(true)}
+      <div class="field"><label class="check"><input type="checkbox" name="has_concern" value="1" id="has-concern"> Report a concern</label></div>
+      <div class="field" id="concern-wrap" hidden>
+        <label for="concern">Concern</label>
+        <textarea id="concern" name="concern" rows="3"></textarea>
+        <div class="hint">Saved on the request. The approver and the submitter can read it.</div>
+      </div>
       ${
         r.submitter_tier !== 1
           ? '<p class="hint">After you classify this, it goes to an approver.</p>'
           : `<div class="field"><label>Approval scope</label>
         <select name="scope">
-          <option value="once">Approve once</option>
-          ${isAdj ? '' : '<option value="indefinite">Approve indefinitely (saves as a recurring SPIF)</option>'}
+          <option value="once">Approve once (this month only)</option>
+          ${isAdj ? '' : `<option value="half_year">Approve through ${esc(halfYearLabel(actions.halfYearEnd))}</option>`}
         </select></div>`
       }
       <button class="btn" name="action" value="classify">${r.submitter_tier === 1 ? 'Classify and approve' : 'Classify and send to approver'}</button>
-      <button class="btn secondary" name="action" value="return">Return to submitter</button>
     </form>`);
   }
   if (actions.approver) {
@@ -396,10 +457,10 @@ function requestDetail(ctx, o) {
       ${isAdj ? `<div class="flash info">${esc(ADJUSTMENT_GUIDE)}</div>` : ''}
       ${reasoningBox(false)}
       <button class="btn" name="action" value="approve_once">Approve once</button>
-      ${isAdj ? '' : '<button class="btn" name="action" value="approve_indefinitely">Approve indefinitely</button>'}
+      ${isAdj ? '' : `<button class="btn" name="action" value="approve_half_year">Approve through ${esc(halfYearLabel(actions.halfYearEnd))}</button>`}
       <button class="btn secondary" name="action" value="return">Return to submitter</button>
       <button class="btn danger" name="action" value="reject">Reject</button>
-      ${isAdj ? '' : '<p class="hint">Indefinite approval saves this as a recurring SPIF. Monthly resubmissions with unchanged terms skip review; any change to the terms brings back full review.</p>'}
+      ${isAdj ? '' : `<p class="hint">Approve once covers this month only. Approving through ${esc(halfYearLabel(actions.halfYearEnd))} (${esc(actions.halfYearEnd)}) lets resubmissions with unchanged terms that end by then skip review; any change to the terms brings back full review.</p>`}
     </form>`);
   }
   if (actions.skip) {
@@ -463,7 +524,8 @@ function requestDetail(ctx, o) {
     <h1>${esc(r.name)} ${statusBadge(r, data, tz)}</h1>
     <p class="subtitle">${esc(TYPES[r.type])} #${r.id}, submitted by ${esc(r.submitter_name)}.
     ${r.classification ? `Finance: <strong>${esc(r.classification)}</strong>. ` : ''}
-    ${r.approval_scope ? `Approver scope: <strong>${esc(r.approval_scope === 'once' ? 'approved once' : 'approved indefinitely')}</strong>.` : ''}</p>
+    ${r.approval_scope ? `Approval: <strong>${esc(scopeLabel(r))}</strong>.` : ''}</p>
+    ${r.finance_concern ? `<div class="flash warn"><strong>Finance concern:</strong> <span class="pre">${esc(r.finance_concern)}</span></div>` : ''}
     ${isAdj ? `<div class="flash info">${esc(ADJUSTMENT_GUIDE)}</div>` : ''}
     <h2>Current terms</h2>
     ${termsTable(data, r.type, filesFor(r.current_version))}
@@ -482,43 +544,45 @@ function requestDetail(ctx, o) {
   );
 }
 
+// rows are the newest approved request for each SPIF name (see recurringSources).
 function savedList(ctx, rows) {
+  const today = todayIn(ctx.user.timezone || 'America/New_York');
   return page(
     ctx,
-    'Saved recurring SPIFs',
+    'Recurring SPIFs',
     `<a class="back" href="/request">&larr; Back</a>
-    <h1>Saved recurring SPIFs</h1>
-    <p class="subtitle">Pick one, enter the new dates, and resubmit. A SPIF is saved when the approver chooses "Approve indefinitely".</p>
+    <h1>Recurring SPIFs</h1>
+    <p class="subtitle">Any approved SPIF can be resubmitted. Pick one, enter the new start and end dates, and resubmit. Everything else is prefilled. It goes through approval again unless its terms are unchanged and a half-year approval still covers the run.${
+      ctx.user.role === 'submitter' && ctx.user.tier === 3 ? ' You see only SPIFs you submitted.' : ''
+    }</p>
     ${
       rows.length
         ? rows
             .map((s) => {
-              const t = JSON.parse(s.terms_json);
+              const standing = s.standing;
+              const through = standing && standing.approved_through >= today ? standing.approved_through : null;
               return `<div class="panel">
-          <h3>${esc(s.name)} ${s.approved_indefinitely ? '<span class="badge s-approved">Indefinitely approved</span>' : ''}</h3>
-          <details><summary>View saved terms</summary>${termsTable(t, 'new_spif')}</details>
+          <h3>${esc(s.name)} ${through ? `<span class="badge s-approved">Approved through ${esc(halfYearLabel(through))}</span>` : ''}</h3>
+          ${ctx.user.role === 'submitter' && ctx.user.tier === 3 ? '' : `<p class="muted">Submitted by ${esc(s.submitter_name)}</p>`}
+          <details><summary>View terms</summary>${termsTable(s.data, 'new_spif')}</details>
           <form method="post" action="/saved/${s.id}/resubmit">
             ${csrfField(ctx)}
             <div class="row">
               <div class="field"><label>Start date</label><input type="date" name="start_date" required></div>
               <div class="field"><label>End date</label><input type="date" name="end_date" required></div>
             </div>
-            <div class="row">
-              <div class="field"><label>Date announced</label><input type="date" name="announce_date" required></div>
-              <div class="field"><label>Announcement method</label><input name="announce_method" required></div>
-            </div>
             <button class="btn">Resubmit with these dates</button>
             <a class="btn secondary" href="/requests/new?type=recurring_spif&saved=${s.id}">Resubmit with changes</a>
           </form>
           ${
-            ctx.user.role === 'admin'
-              ? `<form method="post" action="/saved/${s.id}/revoke" class="inline">${csrfField(ctx)}<button class="link">Revoke indefinite approval and deactivate</button></form>`
+            ctx.user.role === 'admin' && standing
+              ? `<form method="post" action="/saved/${s.id}/revoke" class="inline">${csrfField(ctx)}<button class="link">Revoke approval through ${esc(halfYearLabel(standing.approved_through))} and deactivate</button></form>`
               : ''
           }
         </div>`;
             })
             .join('')
-        : '<p class="muted">No saved recurring SPIFs yet.</p>'
+        : '<p class="muted">No approved SPIFs to resubmit yet.</p>'
     }`
   );
 }
@@ -631,9 +695,35 @@ function admin(ctx, o) {
     }
 
     <h2>Users</h2>
+    <details class="panel">
+      <summary>Add a user</summary>
+      <form method="post" action="/admin/users">
+        ${csrfField(ctx)}
+        <div class="row">
+          <div class="field"><label>Name</label><input name="name" required></div>
+          <div class="field"><label>Email</label><input name="email" type="email" required></div>
+        </div>
+        <div class="row">
+          <div class="field"><label>Role</label><select name="role">${roleOptions('submitter')}</select></div>
+          <div class="field" data-tier-field><label>Tier</label><select name="tier">${tierOptions(3)}</select></div>
+          <div class="field"><label>Time zone</label><select name="timezone">${tzOptions('America/New_York')}</select></div>
+        </div>
+        <div class="row">
+          <div class="field"><label>Slack member ID (optional)</label><input name="slack_id" placeholder="U01ABCDE234"></div>
+          <div class="field"><label>Temporary password (min 10 characters)</label><input name="password" type="password" autocomplete="new-password" required></div>
+        </div>
+        <button class="btn">Add user</button>
+      </form>
+    </details>
+
+    <div class="userlist">
     ${users
       .map(
-        (u) => `<form method="post" action="/admin/users/${u.id}" class="panel userrow">
+        (u) => `<details class="userrow">
+      <summary><span class="uname">${esc(u.name)}</span> <span class="muted">${esc(u.email)} &middot; ${esc(ROLE_LABELS[u.role])}${
+          u.role === 'finance' ? '' : ' &middot; Tier ' + u.tier
+        }${u.active ? '' : ' &middot; Inactive'}</span></summary>
+      <form method="post" action="/admin/users/${u.id}" class="panel">
       ${csrfField(ctx)}
       <div class="row">
         <div class="field"><label>Name</label><input name="name" value="${esc(u.name)}" required></div>
@@ -641,31 +731,20 @@ function admin(ctx, o) {
       </div>
       <div class="row">
         <div class="field"><label>Role</label><select name="role">${roleOptions(u.role)}</select></div>
-        <div class="field"><label>Tier</label><select name="tier">${tierOptions(u.tier)}</select></div>
+        <div class="field" data-tier-field${u.role === 'finance' ? ' hidden' : ''}><label>Tier</label><select name="tier">${tierOptions(u.tier)}</select></div>
         <div class="field"><label>Time zone</label><select name="timezone">${tzOptions(u.timezone)}</select></div>
         <div class="field"><label>Status</label><select name="active"><option value="1"${u.active ? ' selected' : ''}>Active</option><option value="0"${u.active ? '' : ' selected'}>Inactive</option></select></div>
       </div>
-      <div class="field"><label>New password (leave blank to keep)</label><input name="password" type="password" autocomplete="new-password"></div>
+      <div class="row">
+        <div class="field"><label>Slack member ID (optional)</label><input name="slack_id" value="${esc(u.slack_id || '')}" placeholder="U01ABCDE234"></div>
+        <div class="field"><label>New password (leave blank to keep)</label><input name="password" type="password" autocomplete="new-password"></div>
+      </div>
       <button class="btn">Save ${esc(u.name)}</button>
-    </form>`
+      </form>
+    </details>`
       )
       .join('')}
-
-    <h3>Add a user</h3>
-    <form method="post" action="/admin/users" class="panel">
-      ${csrfField(ctx)}
-      <div class="row">
-        <div class="field"><label>Name</label><input name="name" required></div>
-        <div class="field"><label>Email</label><input name="email" type="email" required></div>
-      </div>
-      <div class="row">
-        <div class="field"><label>Role</label><select name="role">${roleOptions('submitter')}</select></div>
-        <div class="field"><label>Tier</label><select name="tier">${tierOptions(3)}</select></div>
-        <div class="field"><label>Time zone</label><select name="timezone">${tzOptions('America/New_York')}</select></div>
-        <div class="field"><label>Temporary password (min 10 characters)</label><input name="password" type="password" autocomplete="new-password" required></div>
-      </div>
-      <button class="btn">Add user</button>
-    </form>
+    </div>
 
     <h2>Saved recurring SPIFs (${saved.length})</h2>
     <p><a href="/saved">Manage saved SPIFs</a> &middot; <a href="/admin/saved-spifs.csv">Export all saved SPIFs (CSV)</a></p>`

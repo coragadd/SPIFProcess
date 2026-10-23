@@ -1,34 +1,109 @@
 'use strict';
+const { db } = require('./db');
 const wf = require('./workflow');
 
-// Posts to the finance Slack channel via an incoming webhook. Never throws: a Slack outage
-// must not block a submission.
-function notifyFinance(req, id) {
-  const webhook = process.env.SLACK_WEBHOOK_URL;
-  if (!webhook) return;
-  try {
-    const r = wf.getRequest(id);
-    if (!r || r.status !== 'finance_review') return;
-    const base = (
-      process.env.APP_URL ||
-      (process.env.RAILWAY_PUBLIC_DOMAIN ? 'https://' + process.env.RAILWAY_PUBLIC_DOMAIN : '') ||
-      `${req.protocol}://${req.get('host')}`
-    ).replace(/\/+$/, '');
-    const url = `${base}/requests/${r.id}`;
-    const type = wf.TYPES[r.type] || r.type;
-    const text = `*${type} awaiting finance approval:* ${r.name}\nSubmitted by ${r.submitter_name}\n<${url}|Review and approve>`;
-    fetch(webhook, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text }),
+// Slack routing. Every id comes from config, none is hardcoded:
+//   SLACK_BOT_TOKEN              bot token (chat:write) used for channels and DMs
+//   SLACK_FINANCE_CHANNEL_ID     where "needs finance action" goes
+//   SLACK_COMMISSION_CHANNEL_ID  where "needs the commissions team" goes
+//   users.slack_id               set per user in Admin; DMs go to the approver or the submitter
+//   SLACK_WEBHOOK_URL            legacy finance-channel webhook, used only while no bot token is set
+// Nothing is sent to the sales leadership channel. Sending never throws: a Slack outage must not
+// block a submission or an approval.
+
+function baseUrl(req) {
+  return (
+    process.env.APP_URL ||
+    (process.env.RAILWAY_PUBLIC_DOMAIN ? 'https://' + process.env.RAILWAY_PUBLIC_DOMAIN : '') ||
+    `${req.protocol}://${req.get('host')}`
+  ).replace(/\/+$/, '');
+}
+
+function post(url, headers, payload, label) {
+  fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(payload) })
+    .then(async (res) => {
+      const body = res.ok && headers.Authorization ? await res.json().catch(() => ({})) : {};
+      if (!res.ok || (headers.Authorization && !body.ok)) {
+        console.error(`Slack notification to ${label} failed:`, res.status, body.error || '');
+      }
     })
-      .then((res) => {
-        if (!res.ok) console.error('Slack notification failed:', res.status);
-      })
-      .catch((e) => console.error('Slack notification failed:', e.message));
+    .catch((e) => console.error(`Slack notification to ${label} failed:`, e.message));
+}
+
+// target is a channel ID or, for a DM, a user's Slack member ID.
+function send(target, text) {
+  const token = process.env.SLACK_BOT_TOKEN;
+  if (!token || !target) return;
+  try {
+    post((process.env.SLACK_API_URL || 'https://slack.com/api') + '/chat.postMessage', { Authorization: `Bearer ${token}` }, { channel: target, text }, target);
   } catch (e) {
     console.error('Slack notification failed:', e.message);
   }
 }
 
-module.exports = { notifyFinance };
+function toFinance(text) {
+  if (process.env.SLACK_BOT_TOKEN) return send(process.env.SLACK_FINANCE_CHANNEL_ID, text);
+  const webhook = process.env.SLACK_WEBHOOK_URL;
+  if (!webhook) return;
+  try {
+    post(webhook, {}, { text }, 'finance webhook');
+  } catch (e) {
+    console.error('Slack notification failed:', e.message);
+  }
+}
+
+const toCommission = (text) => send(process.env.SLACK_COMMISSION_CHANNEL_ID, text);
+
+function dm(userId, text) {
+  const u = db.prepare('SELECT slack_id FROM users WHERE id = ? AND active = 1').get(userId);
+  if (u && u.slack_id) send(u.slack_id, text);
+}
+
+// Users who can approve this submitter's request (tier 1 and tier 2 approvers).
+function approversFor(r) {
+  return db
+    .prepare('SELECT id FROM users WHERE active = 1 AND tier <= 2 AND tier < ? ORDER BY tier')
+    .all(r.submitter_tier);
+}
+
+// Call after anything that changes a request's status. Routes by where the request is now.
+function notifyRequest(req, id) {
+  try {
+    const r = wf.getRequest(id);
+    if (!r) return;
+    const data = wf.currentData(r);
+    const link = `<${baseUrl(req)}/requests/${r.id}|${r.name}>`;
+    const type = wf.TYPES[r.type] || r.type;
+    const concern = r.finance_concern ? `\n*Finance concern:* ${r.finance_concern}` : '';
+
+    if (r.status === 'finance_review') {
+      toFinance(`*${type} needs finance action:* ${link}\nSubmitted by ${r.submitter_name}`);
+    } else if (r.status === 'approver_review') {
+      for (const a of approversFor(r)) dm(a.id, `*${type} needs your approval:* ${link}\nSubmitted by ${r.submitter_name}${concern}`);
+      dm(r.submitter_id, `Finance has reviewed your ${type} ${link}. It is now with the approver.${concern}`);
+    } else if (r.status === 'approved') {
+      const through = r.approval_scope === 'half_year' && r.approval_through ? ` through ${wf.halfYearLabel(r.approval_through)}` : '';
+      dm(r.submitter_id, `Your ${type} ${link} was approved${through}.`);
+      if (data.calculated_by === 'commissions') {
+        toCommission(`*${type} approved, commissions team to calculate the payout amounts:* ${link}\nSubmitted by ${r.submitter_name}`);
+      }
+    } else if (r.status === 'returned' || r.status === 'rejected') {
+      dm(r.submitter_id, `Your ${type} ${link} was ${r.status === 'returned' ? 'returned to you for changes' : 'rejected'}. Open it to see the reason.`);
+    }
+  } catch (e) {
+    console.error('Slack notification failed:', e.message);
+  }
+}
+
+// A submitter changed the winners and amounts after approval: the commissions team needs to know.
+function notifyRepAmounts(req, id, user) {
+  try {
+    const r = wf.getRequest(id);
+    if (!r || !['approved', 'finalized'].includes(r.status) || r.submitter_id !== user.id) return;
+    toCommission(`*Rep amounts updated by ${user.name}:* <${baseUrl(req)}/requests/${r.id}|${r.name}>`);
+  } catch (e) {
+    console.error('Slack notification failed:', e.message);
+  }
+}
+
+module.exports = { notifyRequest, notifyRepAmounts };
