@@ -143,16 +143,26 @@
     })(userLines[u]);
   }
 
-  // Admin: only standard users have a tier.
+  // Admin: only standard users have a tier, and a tier 3 user needs tier 2 and tier 1 reports
+  // (approvers), a tier 2 user needs a tier 1 report.
   var roleSelects = document.querySelectorAll('select[name=role]');
   for (var r = 0; r < roleSelects.length; r++) {
     (function (sel) {
       var tierField = sel.form.querySelector('[data-tier-field]');
       if (!tierField) return;
+      var tierSelect = tierField.querySelector('select');
+      var reportFields = sel.form.querySelectorAll('[data-report-field]');
       var syncTier = function () {
-        tierField.hidden = sel.value !== 'submitter';
+        var standard = sel.value === 'submitter';
+        tierField.hidden = !standard;
+        var tier = Number(tierSelect.value);
+        for (var i = 0; i < reportFields.length; i++) {
+          var needs = Number(reportFields[i].getAttribute('data-report-field'));
+          reportFields[i].hidden = !(standard && (tier === 3 || (tier === 2 && needs === 1)));
+        }
       };
       sel.addEventListener('change', syncTier);
+      tierSelect.addEventListener('change', syncTier);
       syncTier();
     })(roleSelects[r]);
   }

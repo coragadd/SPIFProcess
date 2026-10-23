@@ -184,6 +184,9 @@ addColumnIfMissing('saved_spifs', 'approved_through', 'TEXT');
 // date a half-year approval runs to.
 addColumnIfMissing('requests', 'finance_concern', 'TEXT');
 addColumnIfMissing('requests', 'approval_through', 'TEXT');
+// A submitter's assigned approvers: the tier 1 and tier 2 people their requests go to.
+addColumnIfMissing('users', 'tier1_id', 'INTEGER REFERENCES users(id)');
+addColumnIfMissing('users', 'tier2_id', 'INTEGER REFERENCES users(id)');
 // Slack member ID (starts with U or W) used for direct-message notifications.
 addColumnIfMissing('users', 'slack_id', 'TEXT');
 

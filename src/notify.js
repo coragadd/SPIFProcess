@@ -59,8 +59,15 @@ function dm(userId, text) {
   if (u && u.slack_id) send(u.slack_id, text);
 }
 
-// Users who can approve this submitter's request (tier 1 and tier 2 approvers).
+// The approvers assigned to this submitter (their tier 1 and tier 2 reports). Submitters with none
+// assigned fall back to every higher-tier approver.
 function approversFor(r) {
+  const assigned = [r.submitter_tier1_id, r.submitter_tier2_id].filter(Boolean);
+  if (assigned.length) {
+    return db
+      .prepare(`SELECT id FROM users WHERE active = 1 AND id IN (${assigned.map(() => '?').join(',')}) ORDER BY tier`)
+      .all(...assigned);
+  }
   return db
     .prepare('SELECT id FROM users WHERE active = 1 AND tier <= 2 AND tier < ? ORDER BY tier')
     .all(r.submitter_tier);

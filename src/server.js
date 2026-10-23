@@ -679,7 +679,7 @@ app.get(
   })
 );
 
-function cleanUserInput(body) {
+function cleanUserInput(body, selfId) {
   const name = String(body.name || '').trim();
   const email = String(body.email || '').trim().toLowerCase();
   const role = String(body.role || '');
@@ -697,7 +697,23 @@ function cleanUserInput(body) {
   if (slackId && !/^[UW][A-Z0-9]{6,}$/.test(slackId)) {
     throw new UserError('Slack member ID looks like U01ABCDE234. Find it in Slack under Profile, More, Copy member ID.');
   }
-  return { name, email, role, tier, timezone, password, slackId: slackId || null };
+  // Reports: a tier 3 user needs a tier 2 and a tier 1 approver, a tier 2 user needs a tier 1 approver.
+  // Their requests go to these people. Everyone else has none.
+  let tier1Id = null;
+  let tier2Id = null;
+  const pick = (field, wantTier, label) => {
+    const id = Number(body[field]);
+    const p = id && db.prepare("SELECT id FROM users WHERE id = ? AND active = 1 AND role = 'submitter' AND tier = ?").get(id, wantTier);
+    if (!p || p.id === selfId) throw new UserError(`Choose a tier ${wantTier} report (${label}).`);
+    return p.id;
+  };
+  if (role === 'submitter' && tier === 3) {
+    tier2Id = pick('tier2_id', 2, 'approver');
+    tier1Id = pick('tier1_id', 1, 'approver');
+  } else if (role === 'submitter' && tier === 2) {
+    tier1Id = pick('tier1_id', 1, 'approver');
+  }
+  return { name, email, role, tier, tier1Id, tier2Id, timezone, password, slackId: slackId || null };
 }
 
 function constraintToUserError(e) {
@@ -714,9 +730,17 @@ app.post(
     const tier = u.role === 'admin' ? 3 : u.tier || 3;
     try {
       const info = db
-        .prepare('INSERT INTO users (name, email, password_hash, role, tier, timezone, slack_id) VALUES (?, ?, ?, ?, ?, ?, ?)')
-        .run(u.name, u.email, bcrypt.hashSync(u.password, 10), u.role, tier, u.timezone, u.slackId);
-      audit(req.user, 'user.created', 'user', info.lastInsertRowid, null, { email: u.email, role: u.role, tier });
+        .prepare(
+          'INSERT INTO users (name, email, password_hash, role, tier, tier1_id, tier2_id, timezone, slack_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+        )
+        .run(u.name, u.email, bcrypt.hashSync(u.password, 10), u.role, tier, u.tier1Id, u.tier2Id, u.timezone, u.slackId);
+      audit(req.user, 'user.created', 'user', info.lastInsertRowid, null, {
+        email: u.email,
+        role: u.role,
+        tier,
+        tier1_id: u.tier1Id,
+        tier2_id: u.tier2Id,
+      });
     } catch (e) {
       throw constraintToUserError(e);
     }
@@ -732,18 +756,22 @@ app.post(
     const id = Number(req.params.id);
     const before = db.prepare('SELECT * FROM users WHERE id = ?').get(id);
     if (!before) return notFound(res);
-    const u = cleanUserInput(req.body);
+    const u = cleanUserInput(req.body, id);
     const active = req.body.active === '0' ? 0 : 1;
     if (id === req.user.id && (!active || u.role !== 'admin')) {
       throw new UserError('You cannot deactivate or demote yourself.');
     }
     const tier = u.role === 'admin' ? 3 : u.tier || before.tier;
     try {
-      db.prepare('UPDATE users SET name = ?, email = ?, role = ?, tier = ?, timezone = ?, slack_id = ?, active = ? WHERE id = ?').run(
+      db.prepare(
+        'UPDATE users SET name = ?, email = ?, role = ?, tier = ?, tier1_id = ?, tier2_id = ?, timezone = ?, slack_id = ?, active = ? WHERE id = ?'
+      ).run(
         u.name,
         u.email,
         u.role,
         tier,
+        u.tier1Id,
+        u.tier2Id,
         u.timezone,
         u.slackId,
         active,
@@ -754,8 +782,8 @@ app.post(
       throw constraintToUserError(e);
     }
     audit(req.user, 'user.updated', 'user', id, null, {
-      before: { name: before.name, email: before.email, role: before.role, tier: before.tier, active: before.active, timezone: before.timezone, slack_id: before.slack_id },
-      after: { name: u.name, email: u.email, role: u.role, tier, active, timezone: u.timezone, slack_id: u.slackId },
+      before: { name: before.name, email: before.email, role: before.role, tier: before.tier, active: before.active, timezone: before.timezone, slack_id: before.slack_id, tier1_id: before.tier1_id, tier2_id: before.tier2_id },
+      after: { name: u.name, email: u.email, role: u.role, tier, tier1_id: u.tier1Id, tier2_id: u.tier2Id, active, timezone: u.timezone, slack_id: u.slackId },
       passwordChanged: !!u.password,
     });
     flash(req, 'success', `Saved ${u.name}.`);

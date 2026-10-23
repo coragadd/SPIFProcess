@@ -1,4 +1,4 @@
-﻿'use strict';
+'use strict';
 const { TYPES, STATUS_LABELS, TIMEZONES, GROUPS, PODS, displayStatus, halfYearLabel, todayIn, getReps } = require('./workflow');
 
 const esc = (s) =>
@@ -720,6 +720,19 @@ function roleOptions(current) {
 function admin(ctx, o) {
   const { users, pendingRows, saved } = o;
   const tz = ctx.user.timezone;
+  // Who a user's requests go to: tier 2 and tier 1 reports are picked from active standard users of that tier.
+  const byId = new Map(users.map((x) => [x.id, x.name]));
+  const reportOptions = (wantTier, current) =>
+    `<option value="">Select...</option>` +
+    users
+      .filter((x) => x.active && x.role === 'submitter' && x.tier === wantTier)
+      .map((x) => `<option value="${x.id}"${x.id === current ? ' selected' : ''}>${esc(x.name)}</option>`)
+      .join('');
+  const reportFields = (u) => `<div class="row">
+        <div class="field" data-report-field="2"><label>Tier 2 report (approver)</label><select name="tier2_id">${reportOptions(2, u && u.tier2_id)}</select></div>
+        <div class="field" data-report-field="1"><label>Tier 1 report (approver)</label><select name="tier1_id">${reportOptions(1, u && u.tier1_id)}</select></div>
+      </div>
+      <p class="hint" data-report-field="1">Their requests go to these approvers after finance.</p>`;
   return page(
     ctx,
     'Admin',
@@ -752,6 +765,7 @@ function admin(ctx, o) {
           <div class="field" data-tier-field><label>Tier</label><select name="tier">${tierOptions(3)}</select></div>
           <div class="field"><label>Time zone</label><select name="timezone">${tzOptions('America/New_York')}</select></div>
         </div>
+        ${reportFields(null)}
         <div class="row">
           <div class="field"><label>Slack member ID (optional)</label><input name="slack_id" placeholder="U01ABCDE234"></div>
           <div class="field"><label>Temporary password (min 10 characters)</label><input name="password" type="password" autocomplete="new-password" required></div>
@@ -761,15 +775,15 @@ function admin(ctx, o) {
     </details>
 
     <table class="grid users-grid">
-      <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Tier</th><th>Time zone</th><th>Slack ID</th><th>Status</th></tr></thead>
+      <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Tier</th><th>Tier 2 report</th><th>Tier 1 report</th><th>Time zone</th><th>Slack ID</th><th>Status</th></tr></thead>
       <tbody>
     ${users
       .map(
         (u) => `<tr class="user-line${u.active ? '' : ' inactive'}" tabindex="0" title="Click to edit">
         <td class="uname">${esc(u.name)}</td><td>${esc(u.email)}</td><td>${esc(ROLE_LABELS[u.role])}</td>
-        <td>${u.role !== 'submitter' ? '' : u.tier}</td><td>${esc(u.timezone)}</td><td>${esc(u.slack_id || '')}</td>
+        <td>${u.role !== 'submitter' ? '' : u.tier}</td><td>${esc(byId.get(u.tier2_id) || '')}</td><td>${esc(byId.get(u.tier1_id) || '')}</td><td>${esc(u.timezone)}</td><td>${esc(u.slack_id || '')}</td>
         <td>${u.active ? 'Active' : 'Inactive'}</td></tr>
-      <tr class="user-edit" hidden><td colspan="7">
+      <tr class="user-edit" hidden><td colspan="9">
       <form method="post" action="/admin/users/${u.id}" class="panel">
       ${csrfField(ctx)}
       <div class="row">
@@ -782,6 +796,7 @@ function admin(ctx, o) {
         <div class="field"><label>Time zone</label><select name="timezone">${tzOptions(u.timezone)}</select></div>
         <div class="field"><label>Status</label><select name="active"><option value="1"${u.active ? ' selected' : ''}>Active</option><option value="0"${u.active ? '' : ' selected'}>Inactive</option></select></div>
       </div>
+      ${reportFields(u)}
       <div class="row">
         <div class="field"><label>Slack member ID (optional)</label><input name="slack_id" value="${esc(u.slack_id || '')}" placeholder="U01ABCDE234"></div>
         <div class="field"><label>New password (leave blank to keep)</label><input name="password" type="password" autocomplete="new-password"></div>

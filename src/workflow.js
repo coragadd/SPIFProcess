@@ -175,7 +175,11 @@ function isApprover(user) {
 
 function canApprove(user, r) {
   if (user.role === 'admin') return r.submitter_id !== user.id;
-  return isApprover(user) && user.tier < r.submitter_tier;
+  if (!isApprover(user) || user.tier >= r.submitter_tier) return false;
+  // Requests go to the approvers assigned to the submitter (their tier 1 and tier 2 reports).
+  // Submitters from before reports existed have none assigned and fall back to any higher tier.
+  const assigned = [r.submitter_tier1_id, r.submitter_tier2_id].filter(Boolean);
+  return assigned.length === 0 || assigned.includes(user.id);
 }
 
 // Every request goes to finance first. Tier 1 submitters have no higher-tier approver, so for
@@ -377,7 +381,7 @@ function validate(type, input, user, opts) {
 function getRequest(id) {
   return db
     .prepare(
-      `SELECT r.*, u.name AS submitter_name, u.role AS submitter_role, u.tier AS submitter_tier
+      `SELECT r.*, u.name AS submitter_name, u.role AS submitter_role, u.tier AS submitter_tier, u.tier1_id AS submitter_tier1_id, u.tier2_id AS submitter_tier2_id
        FROM requests r JOIN users u ON u.id = r.submitter_id WHERE r.id = ?`
     )
     .get(id);
@@ -418,7 +422,7 @@ function canView(user, r) {
 function listRequests(user) {
   const rows = db
     .prepare(
-      `SELECT r.*, u.name AS submitter_name, u.tier AS submitter_tier, v.data_json
+      `SELECT r.*, u.name AS submitter_name, u.tier AS submitter_tier, u.tier1_id AS submitter_tier1_id, u.tier2_id AS submitter_tier2_id, v.data_json
        FROM requests r
        JOIN users u ON u.id = r.submitter_id
        JOIN request_versions v ON v.request_id = r.id AND v.version = r.current_version
@@ -879,7 +883,7 @@ const submitResults = db.transaction((user, id, input) => {
 function reportData(user, year) {
   const rows = db
     .prepare(
-      `SELECT r.id, r.type, r.name, r.status, r.created_at, r.submitter_id, u.name AS submitter_name, u.tier AS submitter_tier,
+      `SELECT r.id, r.type, r.name, r.status, r.created_at, r.submitter_id, u.name AS submitter_name, u.tier AS submitter_tier, u.tier1_id AS submitter_tier1_id, u.tier2_id AS submitter_tier2_id,
               v.data_json, res.actual_spend
        FROM requests r
        JOIN users u ON u.id = r.submitter_id
