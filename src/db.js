@@ -9,6 +9,10 @@ const { createClient } = require('@libsql/client');
 //   TURSO_DATABASE_URL  libsql://your-db.turso.io
 //   TURSO_AUTH_TOKEN    token for that database
 // Locally, with neither set, it falls back to a SQLite file in ./data (or DATA_DIR).
+if (process.env.VERCEL && !process.env.TURSO_DATABASE_URL) {
+  throw new Error('TURSO_DATABASE_URL is not set. Add it (and TURSO_AUTH_TOKEN) under Project Settings > Environment Variables, then redeploy.');
+}
+
 // libsql:// URLs open a WebSocket, which suits a long-lived server; over HTTPS each query is a plain
 // request, which is what serverless functions want.
 const url = (
