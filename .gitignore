@@ -3,3 +3,6 @@ data/
 .env
 # Reference workbook holds salary/OTE data. Never commit it; src/reps.json has only names and teams.
 spif-process-reference.xlsx
+.vercel
+.env.*
+!.env.example

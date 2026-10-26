@@ -10,7 +10,8 @@ const wf = require('./workflow');
 //   SLACK_BOT_NAME               optional; overrides the sender name on each message (needs the chat:write.customize scope)
 //   SLACK_WEBHOOK_URL            legacy finance-channel webhook, used only while no bot token is set
 // Nothing is sent to the sales leadership channel. Sending never throws: a Slack outage must not
-// block a submission or an approval.
+// block a submission or an approval. Every send is awaited by the caller, because a serverless
+// function can be frozen as soon as its response goes out, which would drop a message still in flight.
 
 // One line at startup so the deploy log shows which Slack settings the app can see.
 console.log(
@@ -24,54 +25,54 @@ const botName = () => (process.env.SLACK_BOT_NAME ? { username: process.env.SLAC
 function baseUrl(req) {
   return (
     process.env.APP_URL ||
-    (process.env.RAILWAY_PUBLIC_DOMAIN ? 'https://' + process.env.RAILWAY_PUBLIC_DOMAIN : '') ||
+    (process.env.VERCEL_PROJECT_PRODUCTION_URL ? 'https://' + process.env.VERCEL_PROJECT_PRODUCTION_URL : '') ||
     `${req.protocol}://${req.get('host')}`
   ).replace(/\/+$/, '');
 }
 
-function post(url, headers, payload, label) {
-  fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(payload) })
-    .then(async (res) => {
-      const body = res.ok && headers.Authorization ? await res.json().catch(() => ({})) : {};
-      if (!res.ok || (headers.Authorization && !body.ok)) {
-        console.error(`Slack notification to ${label} failed:`, res.status, body.error || '');
-      } else {
-        console.log(`Slack: message sent to ${label}.`);
-      }
-    })
-    .catch((e) => console.error(`Slack notification to ${label} failed:`, e.message));
+const SLACK_TIMEOUT_MS = 5000;
+
+async function post(url, headers, payload, label) {
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...headers },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(SLACK_TIMEOUT_MS),
+    });
+    const body = res.ok && headers.Authorization ? await res.json().catch(() => ({})) : {};
+    if (!res.ok || (headers.Authorization && !body.ok)) {
+      console.error(`Slack notification to ${label} failed:`, res.status, body.error || '');
+    } else {
+      console.log(`Slack: message sent to ${label}.`);
+    }
+  } catch (e) {
+    console.error(`Slack notification to ${label} failed:`, e.message);
+  }
 }
 
 // target is a channel ID or, for a DM, a user's Slack member ID.
 // `what` names the destination in log lines, so a missing setting is easy to spot.
-function send(target, text, what) {
+async function send(target, text, what) {
   const token = process.env.SLACK_BOT_TOKEN;
   if (!token) return console.warn(`Slack: not sending to ${what}, SLACK_BOT_TOKEN is not set.`);
   if (!target) return console.warn(`Slack: not sending to ${what}, its ID is not set.`);
-  try {
-    post((process.env.SLACK_API_URL || 'https://slack.com/api') + '/chat.postMessage', { Authorization: `Bearer ${token}` }, { channel: target, text, ...botName() }, target);
-  } catch (e) {
-    console.error('Slack notification failed:', e.message);
-  }
+  await post((process.env.SLACK_API_URL || 'https://slack.com/api') + '/chat.postMessage', { Authorization: `Bearer ${token}` }, { channel: target, text, ...botName() }, target);
 }
 
-function toFinance(text) {
+async function toFinance(text) {
   if (process.env.SLACK_BOT_TOKEN) return send(process.env.SLACK_FINANCE_CHANNEL_ID, text, 'the finance channel (SLACK_FINANCE_CHANNEL_ID)');
   const webhook = process.env.SLACK_WEBHOOK_URL;
   if (!webhook) return;
-  try {
-    post(webhook, {}, { text }, 'finance webhook');
-  } catch (e) {
-    console.error('Slack notification failed:', e.message);
-  }
+  await post(webhook, {}, { text }, 'finance webhook');
 }
 
 const toCommission = (text) => send(process.env.SLACK_COMMISSION_CHANNEL_ID, text, 'the commission channel (SLACK_COMMISSION_CHANNEL_ID)');
 
 // DMs open the conversation with the person first (conversations.open, needs the im:write scope)
 // and post to the DM channel Slack returns, which is more dependable than posting to a user ID.
-function dm(userId, text) {
-  const u = db.prepare('SELECT name, slack_id FROM users WHERE id = ? AND active = 1').get(userId);
+async function dm(userId, text) {
+  const u = await db.prepare('SELECT name, slack_id FROM users WHERE id = ? AND active = 1').get(userId);
   if (!u) return;
   const token = process.env.SLACK_BOT_TOKEN;
   if (!token) return console.warn(`Slack: not sending to ${u.name}, SLACK_BOT_TOKEN is not set.`);
@@ -82,22 +83,22 @@ function dm(userId, text) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
       body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(SLACK_TIMEOUT_MS),
     }).then((res) => res.json());
-  call('conversations.open', { users: u.slack_id })
-    .then((open) => {
-      if (!open.ok) throw new Error(`conversations.open: ${open.error}${open.needed ? ' (needs scope ' + open.needed + ')' : ''}`);
-      return call('chat.postMessage', { channel: open.channel.id, text, ...botName() });
-    })
-    .then((sent) => {
-      if (!sent.ok) throw new Error(`chat.postMessage: ${sent.error}`);
-      console.log(`Slack: DM sent to ${u.name} (${u.slack_id}).`);
-    })
-    .catch((e) => console.error(`Slack DM to ${u.name} (${u.slack_id}) failed: ${e.message}`));
+  try {
+    const open = await call('conversations.open', { users: u.slack_id });
+    if (!open.ok) throw new Error(`conversations.open: ${open.error}${open.needed ? ' (needs scope ' + open.needed + ')' : ''}`);
+    const sent = await call('chat.postMessage', { channel: open.channel.id, text, ...botName() });
+    if (!sent.ok) throw new Error(`chat.postMessage: ${sent.error}`);
+    console.log(`Slack: DM sent to ${u.name} (${u.slack_id}).`);
+  } catch (e) {
+    console.error(`Slack DM to ${u.name} (${u.slack_id}) failed: ${e.message}`);
+  }
 }
 
 // The approvers assigned to this submitter (their tier 1 and tier 2 reports). Submitters with none
 // assigned fall back to every higher-tier approver.
-function approversFor(r) {
+async function approversFor(r) {
   const assigned = [r.submitter_tier1_id, r.submitter_tier2_id].filter(Boolean);
   if (assigned.length) {
     return db
@@ -110,31 +111,34 @@ function approversFor(r) {
 }
 
 // Call after anything that changes a request's status. Routes by where the request is now.
-function notifyRequest(req, id) {
+async function notifyRequest(req, id) {
   try {
-    const r = wf.getRequest(id);
+    const r = await wf.getRequest(id);
     if (!r) return;
-    const data = wf.currentData(r);
+    const data = await wf.currentData(r);
     console.log(`Slack: request ${r.id} is now ${r.status}.`);
     const link = `<${baseUrl(req)}/requests/${r.id}|${r.name}>`;
     const type = wf.TYPES[r.type] || r.type;
     const concern = r.finance_concern ? `\n*Finance concern:* ${r.finance_concern}` : '';
 
     if (r.status === 'finance_review') {
-      toFinance(`*${type} needs finance action:* ${link}\nSubmitted by ${r.submitter_name}`);
+      await toFinance(`*${type} needs finance action:* ${link}\nSubmitted by ${r.submitter_name}`);
     } else if (r.status === 'approver_review') {
-      for (const a of approversFor(r)) dm(a.id, `*${type} needs your approval:* ${link}\nSubmitted by ${r.submitter_name}${concern}`);
-      dm(r.submitter_id, `Finance has reviewed your ${type} ${link}. It is now with the approver.${concern}`);
+      const approvers = await approversFor(r);
+      await Promise.all([
+        ...approvers.map((a) => dm(a.id, `*${type} needs your approval:* ${link}\nSubmitted by ${r.submitter_name}${concern}`)),
+        dm(r.submitter_id, `Finance has reviewed your ${type} ${link}. It is now with the approver.${concern}`),
+      ]);
     } else if (r.status === 'approved' && data.bonus_kind === 'mbo') {
       // A monthly MBO is approved on submission and sends no Slack messages.
     } else if (r.status === 'approved') {
       const through = r.approval_scope === 'half_year' && r.approval_through ? ` through ${wf.halfYearLabel(r.approval_through)}` : '';
-      dm(r.submitter_id, `Your ${type} ${link} was approved${through}.`);
+      await dm(r.submitter_id, `Your ${type} ${link} was approved${through}.`);
       if (data.calculated_by === 'commissions') {
-        toCommission(`*${type} approved, commissions team to calculate the payout amounts:* ${link}\nSubmitted by ${r.submitter_name}`);
+        await toCommission(`*${type} approved, commissions team to calculate the payout amounts:* ${link}\nSubmitted by ${r.submitter_name}`);
       }
     } else if (r.status === 'returned' || r.status === 'rejected') {
-      dm(r.submitter_id, `Your ${type} ${link} was ${r.status === 'returned' ? 'returned to you for changes' : 'rejected'}. Open it to see the reason.`);
+      await dm(r.submitter_id, `Your ${type} ${link} was ${r.status === 'returned' ? 'returned to you for changes' : 'rejected'}. Open it to see the reason.`);
     }
   } catch (e) {
     console.error('Slack notification failed:', e.message);
@@ -142,11 +146,11 @@ function notifyRequest(req, id) {
 }
 
 // A submitter changed the winners and amounts after approval: the commissions team needs to know.
-function notifyRepAmounts(req, id, user) {
+async function notifyRepAmounts(req, id, user) {
   try {
-    const r = wf.getRequest(id);
+    const r = await wf.getRequest(id);
     if (!r || !['approved', 'finalized'].includes(r.status) || r.submitter_id !== user.id) return;
-    toCommission(`*Rep amounts updated by ${user.name}:* <${baseUrl(req)}/requests/${r.id}|${r.name}>`);
+    await toCommission(`*Rep amounts updated by ${user.name}:* <${baseUrl(req)}/requests/${r.id}|${r.name}>`);
   } catch (e) {
     console.error('Slack notification failed:', e.message);
   }

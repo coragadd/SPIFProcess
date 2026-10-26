@@ -1,13 +1,12 @@
 'use strict';
 const crypto = require('crypto');
-const fs = require('fs');
 const path = require('path');
 const express = require('express');
 const cookieSession = require('cookie-session');
 const bcrypt = require('bcryptjs');
 const multer = require('multer');
 
-const { db, audit, seedAdmin, dataDir, uploadDir } = require('./db');
+const { db, audit, ready, getBlob } = require('./db');
 const wf = require('./workflow');
 const views = require('./views');
 const { notifyRequest, notifyRepAmounts } = require('./notify');
@@ -16,25 +15,30 @@ const { UserError } = wf;
 
 // ---------------------------------------------------------------- config
 
-const onRailway = !!(process.env.RAILWAY_ENVIRONMENT || process.env.RAILWAY_PROJECT_ID);
+// On Vercel this module is loaded by api/index.js, which exports `app`; locally, `npm start` runs
+// it directly and it listens on a port (see the bottom of the file).
+const onVercel = !!process.env.VERCEL;
 let sessionSecret = process.env.SESSION_SECRET;
 if (!sessionSecret) {
-  if (onRailway || process.env.NODE_ENV === 'production') {
-    console.error('SESSION_SECRET must be set. Refusing to start.');
-    process.exit(1);
+  if (onVercel || process.env.NODE_ENV === 'production') {
+    throw new Error('SESSION_SECRET must be set.');
   }
   sessionSecret = crypto.randomBytes(32).toString('hex');
   console.warn('SESSION_SECRET not set; using a temporary one (sessions reset on restart).');
 }
-
-seedAdmin();
 
 const app = express();
 app.set('trust proxy', 1);
 app.disable('x-powered-by');
 
 app.get('/healthz', (req, res) => res.type('text').send('ok'));
-app.use('/static', express.static(path.join(__dirname, '..', 'public')));
+// On Vercel the CDN serves public/static/ at /static/ before the app is reached; this is for local runs.
+app.use('/static', express.static(path.join(__dirname, '..', 'public', 'static')));
+
+// Create the tables and seed the first admin and the rep list, once per server instance.
+app.use((req, res, next) => {
+  ready().then(() => next(), next);
+});
 
 app.use((req, res, next) => {
   res.set({
@@ -58,15 +62,19 @@ app.use(
 );
 
 // Load the signed-in user fresh from the DB on every request (so deactivation is immediate).
-app.use((req, res, next) => {
-  if (!req.session.csrf) req.session.csrf = crypto.randomBytes(24).toString('hex');
-  req.user = null;
-  if (req.session.uid) {
-    const u = db.prepare('SELECT * FROM users WHERE id = ? AND active = 1').get(req.session.uid);
-    if (u) req.user = u;
-    else req.session = { csrf: req.session.csrf };
+app.use(async (req, res, next) => {
+  try {
+    if (!req.session.csrf) req.session.csrf = crypto.randomBytes(24).toString('hex');
+    req.user = null;
+    if (req.session.uid) {
+      const u = await db.prepare('SELECT * FROM users WHERE id = ? AND active = 1').get(req.session.uid);
+      if (u) req.user = u;
+      else req.session = { csrf: req.session.csrf };
+    }
+    next();
+  } catch (e) {
+    next(e);
   }
-  next();
 });
 
 function csrfOk(req) {
@@ -93,15 +101,14 @@ app.use((req, res, next) => {
 // ---------------------------------------------------------------- uploads
 
 const ALLOWED_EXT = ['.pdf', '.doc', '.docx', '.xls', '.xlsx', '.csv', '.txt', '.png', '.jpg', '.jpeg'];
-const MAX_FILE_BYTES = 10 * 1024 * 1024;
+// Vercel rejects request bodies over 4.5 MB before they reach the app, so attachments are held to
+// 4 MB in total per submission. Files are kept in memory, then stored in the database.
+const MAX_TOTAL_BYTES = 4 * 1024 * 1024;
 const MAX_FILES = 5;
 
 const uploader = multer({
-  storage: multer.diskStorage({
-    destination: uploadDir,
-    filename: (req, file, cb) => cb(null, crypto.randomBytes(16).toString('hex')),
-  }),
-  limits: { fileSize: MAX_FILE_BYTES, files: MAX_FILES },
+  storage: multer.memoryStorage(),
+  limits: { fileSize: MAX_TOTAL_BYTES, files: MAX_FILES },
   fileFilter: (req, file, cb) => {
     const ext = path.extname(file.originalname || '').toLowerCase();
     if (!ALLOWED_EXT.includes(ext)) return cb(new UserError(`"${file.originalname}" is not an allowed file type.`));
@@ -109,20 +116,15 @@ const uploader = multer({
   },
 }).array('eligibility_files', MAX_FILES);
 
-function removeTempFiles(req) {
-  for (const f of req.files || []) fs.unlink(f.path, () => {});
-}
-
-// Parses the multipart form, then verifies the CSRF token (discarding files if it fails).
+// Parses the multipart form, then verifies the CSRF token.
 function handleUpload(req, res, next) {
   uploader(req, res, (err) => {
     if (err) {
-      removeTempFiles(req);
       const msg =
         err instanceof UserError
           ? err.message
           : err.code === 'LIMIT_FILE_SIZE'
-          ? 'Each file must be 10 MB or smaller.'
+          ? 'Attachments must total 4 MB or less.'
           : err.code === 'LIMIT_FILE_COUNT' || err.code === 'LIMIT_UNEXPECTED_FILE'
           ? `Attach at most ${MAX_FILES} files.`
           : 'The upload failed. Try again.';
@@ -130,21 +132,33 @@ function handleUpload(req, res, next) {
       return res.redirect(req.get('Referer') || '/request');
     }
     if (!csrfOk(req)) {
-      removeTempFiles(req);
       return res.status(403).send('Invalid or expired form. Go back, refresh the page, and try again.');
+    }
+    const total = (req.files || []).reduce((n, f) => n + f.size, 0);
+    if (total > MAX_TOTAL_BYTES) {
+      flash(req, 'error', 'Attachments must total 4 MB or less.');
+      return res.redirect(req.get('Referer') || '/request');
     }
     next();
   });
 }
 
+// The file bytes ride along in `data`; workflow.saveAttachments stores them inside the same
+// transaction as the request, so a failed submission leaves nothing behind.
 function uploadedRecords(req) {
   return (req.files || []).map((f) => ({
     original_name: path.basename(f.originalname),
-    stored_name: f.filename,
+    stored_name: crypto.randomBytes(16).toString('hex'),
     mime: f.mimetype,
     size: f.size,
-    sha256: crypto.createHash('sha256').update(fs.readFileSync(f.path)).digest('hex'),
+    sha256: crypto.createHash('sha256').update(f.buffer).digest('hex'),
+    data: f.buffer,
   }));
+}
+
+// The request form needs the rep list for the monthly MBO picker.
+async function formOptions(o) {
+  return { ...o, reps: o.type === 'bonus' ? await wf.getReps() : undefined };
 }
 
 // Which of the existing attachments the submitter chose to keep (the form's checked boxes).
@@ -191,12 +205,13 @@ function notFound(res) {
   res.status(404).send('Not found.');
 }
 
-const loginAttempts = new Map();
-function tooManyAttempts(key) {
-  const now = Date.now();
-  const rec = (loginAttempts.get(key) || []).filter((t) => now - t < 15 * 60 * 1000);
-  loginAttempts.set(key, rec);
-  return rec.length >= 10;
+// Failed sign-ins are counted in the database, since serverless instances do not share memory.
+const LOGIN_WINDOW_MS = 15 * 60 * 1000;
+async function tooManyAttempts(key) {
+  const cutoff = Date.now() - LOGIN_WINDOW_MS;
+  await db.prepare('DELETE FROM login_attempts WHERE ts < ?').run(cutoff);
+  const row = await db.prepare('SELECT COUNT(*) AS n FROM login_attempts WHERE key = ?').get(key);
+  return row.n >= 10;
 }
 
 
@@ -209,23 +224,23 @@ app.get('/login', (req, res) => {
 
 app.post(
   '/login',
-  wrap((req, res) => {
+  wrap(async (req, res) => {
     const email = String(req.body.email || '').trim().toLowerCase();
     const key = req.ip + '|' + email;
-    if (tooManyAttempts(key)) {
+    if (await tooManyAttempts(key)) {
       return res.status(429).send(views.login(ctx(req), 'Too many attempts. Try again in 15 minutes.'));
     }
-    const u = db.prepare('SELECT * FROM users WHERE email = ? AND active = 1').get(email);
+    const u = await db.prepare('SELECT * FROM users WHERE email = ? AND active = 1').get(email);
     // Compare against a dummy hash for unknown users so timing does not reveal which emails exist.
     const hash = u ? u.password_hash : '$2a$10$7EqJtq98hPqEX7fNZaFWoOa1hX4cG6Vf7sT0n7y3Y6mZy0kq1QJ5e';
     const ok = bcrypt.compareSync(String(req.body.password || ''), hash);
     if (!u || !ok) {
-      loginAttempts.get(key).push(Date.now());
+      await db.prepare('INSERT INTO login_attempts (key, ts) VALUES (?, ?)').run(key, Date.now());
       return res.status(401).send(views.login(ctx(req), 'Incorrect email or password.'));
     }
-    loginAttempts.delete(key);
+    await db.prepare('DELETE FROM login_attempts WHERE key = ?').run(key);
     req.session = { uid: u.id, csrf: crypto.randomBytes(24).toString('hex') };
-    audit(u, 'user.login', 'user', u.id, null, null);
+    await audit(u, 'user.login', 'user', u.id, null, null);
     res.redirect('/');
   })
 );
@@ -241,8 +256,8 @@ app.use(requireAuth);
 
 app.get(
   '/',
-  wrap((req, res) => {
-    const pending = wf.queueFor(req.user, wf.listRequests(req.user)).length;
+  wrap(async (req, res) => {
+    const pending = wf.queueFor(req.user, await wf.listRequests(req.user)).length;
     res.send(views.home(ctx(req), pending));
   })
 );
@@ -251,14 +266,14 @@ app.get('/account', (req, res) => res.send(views.account(ctx(req))));
 
 app.post(
   '/account',
-  wrap((req, res) => {
+  wrap(async (req, res) => {
     const tz = String(req.body.timezone || '');
     if (!wf.isValidTz(tz)) throw new UserError('Choose a valid time zone.');
     const pw = String(req.body.password || '');
     if (pw && pw.length < 10) throw new UserError('Passwords need at least 10 characters.');
-    db.prepare('UPDATE users SET timezone = ? WHERE id = ?').run(tz, req.user.id);
-    if (pw) db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(bcrypt.hashSync(pw, 10), req.user.id);
-    audit(req.user, 'user.account_updated', 'user', req.user.id, null, { timezone: tz, passwordChanged: !!pw });
+    await db.prepare('UPDATE users SET timezone = ? WHERE id = ?').run(tz, req.user.id);
+    if (pw) await db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(bcrypt.hashSync(pw, 10), req.user.id);
+    await audit(req.user, 'user.account_updated', 'user', req.user.id, null, { timezone: tz, passwordChanged: !!pw });
     flash(req, 'success', 'Saved.');
     res.redirect('/account');
   })
@@ -272,7 +287,7 @@ const NEW_TYPES = ['new_spif', 'recurring_spif', 'bonus', 'adjustment'];
 
 app.get(
   '/requests/new',
-  wrap((req, res) => {
+  wrap(async (req, res) => {
     const type = String(req.query.type || '');
     if (!NEW_TYPES.includes(type)) return res.redirect('/request');
     let values = {};
@@ -281,24 +296,27 @@ app.get(
     let existingFiles = [];
     if (type === 'recurring_spif') {
       if (!req.query.saved) return res.redirect('/saved');
-      const s = wf.recurringSource(req.user, req.query.saved);
+      const s = await wf.recurringSource(req.user, req.query.saved);
       values = { ...s.data, name: s.name };
       savedId = s.id;
       lockName = true;
-      existingFiles = savedAttachments(s);
+      existingFiles = await savedAttachments(s);
     }
     res.send(
-      views.requestForm(ctx(req), {
-        type,
-        values,
-        errors: {},
-        action: '/requests',
-        submitLabel: 'Submit for approval',
-        savedId,
-        lockName,
-        existingFiles,
-        keptIds: existingFiles.map((a) => String(a.id)),
-      })
+      views.requestForm(
+        ctx(req),
+        await formOptions({
+          type,
+          values,
+          errors: {},
+          action: '/requests',
+          submitLabel: 'Submit for approval',
+          savedId,
+          lockName,
+          existingFiles,
+          keptIds: existingFiles.map((a) => String(a.id)),
+        })
+      )
     );
   })
 );
@@ -311,27 +329,27 @@ function savedAttachments(source) {
 app.post(
   '/requests',
   handleUpload,
-  wrap((req, res) => {
-    try {
-      const type = String(req.body.type || '');
-      if (!NEW_TYPES.includes(type)) throw new UserError('Unknown request type.');
-      let saved = null;
-      let existing = [];
-      if (type === 'recurring_spif') {
-        saved = wf.recurringSource(req.user, req.body.saved_id);
-        existing = savedAttachments(saved);
-      }
-      const kept = keptRows(req, existing);
-      const uploaded = uploadedRecords(req);
-      const { errors, data } = wf.validate(type, req.body, req.user, {
-        fixedName: saved ? saved.name : null,
-      });
-      if (Object.keys(errors).length) {
-        removeTempFiles(req);
-        const values = { ...req.body };
-        if (saved) values.name = saved.name;
-        return res.status(400).send(
-          views.requestForm(ctx(req), {
+  wrap(async (req, res) => {
+    const type = String(req.body.type || '');
+    if (!NEW_TYPES.includes(type)) throw new UserError('Unknown request type.');
+    let saved = null;
+    let existing = [];
+    if (type === 'recurring_spif') {
+      saved = await wf.recurringSource(req.user, req.body.saved_id);
+      existing = await savedAttachments(saved);
+    }
+    const kept = keptRows(req, existing);
+    const uploaded = uploadedRecords(req);
+    const { errors, data } = await wf.validate(type, req.body, req.user, {
+      fixedName: saved ? saved.name : null,
+    });
+    if (Object.keys(errors).length) {
+      const values = { ...req.body };
+      if (saved) values.name = saved.name;
+      return res.status(400).send(
+        views.requestForm(
+          ctx(req),
+          await formOptions({
             type,
             values,
             errors,
@@ -343,36 +361,32 @@ app.post(
             keptIds: kept.map((a) => String(a.id)),
             reattach: uploaded.length > 0,
           })
-        );
-      }
-      if (data.bonus_kind === 'mbo') {
-        removeTempFiles(req);
-        const mboId = wf.createMbo(req.user, data);
-        notifyRequest(req, mboId);
-        flash(req, 'success', 'Monthly MBO recorded. It does not need approval.');
-        return res.redirect('/requests/' + mboId);
-      }
-      const id = wf.createRequest(req.user, type, data, saved ? saved.standing : null, uploaded, kept);
-      notifyRequest(req, id);
-      flash(req, 'success', 'Request submitted.');
-      res.redirect('/requests/' + id);
-    } catch (e) {
-      removeTempFiles(req);
-      throw e;
+        )
+      );
     }
+    if (data.bonus_kind === 'mbo') {
+      const mboId = await wf.createMbo(req.user, data);
+      await notifyRequest(req, mboId);
+      flash(req, 'success', 'Monthly MBO recorded. It does not need approval.');
+      return res.redirect('/requests/' + mboId);
+    }
+    const id = await wf.createRequest(req.user, type, data, saved ? saved.standing : null, uploaded, kept);
+    await notifyRequest(req, id);
+    flash(req, 'success', 'Request submitted.');
+    res.redirect('/requests/' + id);
   })
 );
 
 app.get(
   '/requests',
-  wrap((req, res) => {
-    const rows = wf.listRequests(req.user);
-    res.send(views.requestList(ctx(req), rows, wf.queueFor(req.user, rows), wf.repAmountTotals()));
+  wrap(async (req, res) => {
+    const rows = await wf.listRequests(req.user);
+    res.send(views.requestList(ctx(req), rows, wf.queueFor(req.user, rows), await wf.repAmountTotals()));
   })
 );
 
-function loadVisible(req, res) {
-  const r = wf.getRequest(Number(req.params.id));
+async function loadVisible(req, res) {
+  const r = await wf.getRequest(Number(req.params.id));
   if (!r || !wf.canView(req.user, r)) {
     notFound(res);
     return null;
@@ -382,23 +396,23 @@ function loadVisible(req, res) {
 
 app.get(
   '/requests/:id',
-  wrap((req, res) => {
-    const r = loadVisible(req, res);
+  wrap(async (req, res) => {
+    const r = await loadVisible(req, res);
     if (!r) return;
-    const data = wf.currentData(r);
+    const data = await wf.currentData(r);
     res.send(
       views.requestDetail(ctx(req), {
         r,
         data,
-        versions: wf.getVersions(r.id),
-        attachments: db.prepare('SELECT * FROM attachments WHERE request_id = ? ORDER BY id').all(r.id),
-        steps: wf.getSteps(r.id),
+        versions: await wf.getVersions(r.id),
+        attachments: await db.prepare('SELECT * FROM attachments WHERE request_id = ? ORDER BY id').all(r.id),
+        steps: await wf.getSteps(r.id),
         actions: wf.availableActions(req.user, r, data),
-        auditRows: db.prepare('SELECT * FROM audit_log WHERE request_id = ? ORDER BY id').all(r.id),
-        results: db.prepare('SELECT * FROM results WHERE request_id = ?').get(r.id),
-        repAmounts: wf.getRepAmounts(r.id),
-        reps: wf.getReps(),
-        canEditRepAmounts: wf.canEditRepAmounts(req.user, r),
+        auditRows: await db.prepare('SELECT * FROM audit_log WHERE request_id = ? ORDER BY id').all(r.id),
+        results: await db.prepare('SELECT * FROM results WHERE request_id = ?').get(r.id),
+        repAmounts: await wf.getRepAmounts(r.id),
+        reps: await wf.getReps(),
+        canEditRepAmounts: await wf.canEditRepAmounts(req.user, r),
       })
     );
   })
@@ -406,23 +420,26 @@ app.get(
 
 app.get(
   '/requests/:id/edit',
-  wrap((req, res) => {
-    const r = loadVisible(req, res);
+  wrap(async (req, res) => {
+    const r = await loadVisible(req, res);
     if (!r) return;
     if (r.submitter_id !== req.user.id || r.status !== 'returned') throw new UserError('This request cannot be edited.');
-    const existing = wf.attachmentsFor(r.id, r.current_version);
+    const existing = await wf.attachmentsFor(r.id, r.current_version);
     res.send(
-      views.requestForm(ctx(req), {
-        type: r.type,
-        values: wf.currentData(r),
-        errors: {},
-        action: `/requests/${r.id}/edit`,
-        submitLabel: 'Resubmit for approval',
-        lockName: r.type === 'recurring_spif',
-        requestId: r.id,
-        existingFiles: existing,
-        keptIds: existing.map((a) => String(a.id)),
-      })
+      views.requestForm(
+        ctx(req),
+        await formOptions({
+          type: r.type,
+          values: await wf.currentData(r),
+          errors: {},
+          action: `/requests/${r.id}/edit`,
+          submitLabel: 'Resubmit for approval',
+          lockName: r.type === 'recurring_spif',
+          requestId: r.id,
+          existingFiles: existing,
+          keptIds: existing.map((a) => String(a.id)),
+        })
+      )
     );
   })
 );
@@ -430,22 +447,22 @@ app.get(
 app.post(
   '/requests/:id/edit',
   handleUpload,
-  wrap((req, res) => {
-    try {
-      const r = loadVisible(req, res);
-      if (!r) return removeTempFiles(req);
-      if (r.submitter_id !== req.user.id || r.status !== 'returned') throw new UserError('This request cannot be edited.');
-      const existing = wf.attachmentsFor(r.id, r.current_version);
-      const kept = keptRows(req, existing);
-      const uploaded = uploadedRecords(req);
-      const { errors, data } = wf.validate(r.type, req.body, req.user, {
-        excludeId: r.id,
-        fixedName: r.type === 'recurring_spif' ? r.name : null,
-      });
-      if (Object.keys(errors).length) {
-        removeTempFiles(req);
-        return res.status(400).send(
-          views.requestForm(ctx(req), {
+  wrap(async (req, res) => {
+    const r = await loadVisible(req, res);
+    if (!r) return;
+    if (r.submitter_id !== req.user.id || r.status !== 'returned') throw new UserError('This request cannot be edited.');
+    const existing = await wf.attachmentsFor(r.id, r.current_version);
+    const kept = keptRows(req, existing);
+    const uploaded = uploadedRecords(req);
+    const { errors, data } = await wf.validate(r.type, req.body, req.user, {
+      excludeId: r.id,
+      fixedName: r.type === 'recurring_spif' ? r.name : null,
+    });
+    if (Object.keys(errors).length) {
+      return res.status(400).send(
+        views.requestForm(
+          ctx(req),
+          await formOptions({
             type: r.type,
             values: { ...req.body, name: r.type === 'recurring_spif' ? r.name : req.body.name },
             errors,
@@ -457,29 +474,32 @@ app.post(
             keptIds: kept.map((a) => String(a.id)),
             reattach: uploaded.length > 0,
           })
-        );
-      }
-      wf.resubmitRequest(req.user, r.id, data, uploaded, kept);
-      notifyRequest(req, r.id);
-      flash(req, 'success', 'Resubmitted for approval.');
-      res.redirect('/requests/' + r.id);
-    } catch (e) {
-      removeTempFiles(req);
-      throw e;
+        )
+      );
     }
+    await wf.resubmitRequest(req.user, r.id, data, uploaded, kept);
+    await notifyRequest(req, r.id);
+    flash(req, 'success', 'Resubmitted for approval.');
+    res.redirect('/requests/' + r.id);
   })
 );
 
 // Download an attached document. Only people who can see the request may fetch it.
 app.get(
   '/attachments/:id',
-  wrap((req, res) => {
-    const a = db.prepare('SELECT * FROM attachments WHERE id = ?').get(Number(req.params.id));
-    const r = a && wf.getRequest(a.request_id);
+  wrap(async (req, res) => {
+    const a = await db.prepare('SELECT * FROM attachments WHERE id = ?').get(Number(req.params.id));
+    const r = a && (await wf.getRequest(a.request_id));
     if (!a || !r || !wf.canView(req.user, r)) return notFound(res);
-    const file = path.join(uploadDir, path.basename(a.stored_name));
-    if (!fs.existsSync(file)) return notFound(res);
-    res.download(file, a.original_name);
+    const data = await getBlob(a.stored_name);
+    if (!data) return notFound(res);
+    res.set({
+      'Content-Type': a.mime || 'application/octet-stream',
+      'Content-Length': data.length,
+      // RFC 5987 form, so names with spaces or non-ASCII characters survive.
+      'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(a.original_name)}`,
+    });
+    res.send(data);
   })
 );
 
@@ -487,11 +507,11 @@ app.get(
 const actionRoute = (name, fn, okMsg, after) =>
   app.post(
     `/requests/:id/${name}`,
-    wrap((req, res) => {
-      const r = loadVisible(req, res);
+    wrap(async (req, res) => {
+      const r = await loadVisible(req, res);
       if (!r) return;
-      const result = fn(req.user, r.id, req.body);
-      if (after) after(req, r.id, result);
+      const result = await fn(req.user, r.id, req.body);
+      if (after) await after(req, r.id, result);
       flash(req, 'success', okMsg);
       res.redirect('/requests/' + r.id);
     })
@@ -502,36 +522,36 @@ actionRoute('approver', wf.approverDecide, 'Approver decision recorded.', notify
 actionRoute('skip', wf.adminSkip, 'Step skipped and logged.', notifyRequest);
 actionRoute('cancel', wf.cancelRequest, 'Request cancelled.');
 actionRoute('results', wf.submitResults, 'Results submitted. The request is finalized.');
-actionRoute('rep-amounts', wf.saveRepAmounts, 'Rep amounts saved.', (req, id, changed) => {
-  if (changed) notifyRepAmounts(req, id, req.user);
+actionRoute('rep-amounts', wf.saveRepAmounts, 'Rep amounts saved.', async (req, id, changed) => {
+  if (changed) await notifyRepAmounts(req, id, req.user);
 });
 
 // ---------------------------------------------------------------- saved recurring SPIFs
 
 app.get(
   '/saved',
-  wrap((req, res) => {
-    res.send(views.savedList(ctx(req), wf.recurringSources(req.user)));
+  wrap(async (req, res) => {
+    res.send(views.savedList(ctx(req), await wf.recurringSources(req.user)));
   })
 );
 
 // :id is the request being resubmitted (the newest approved request for that SPIF name).
 app.post(
   '/saved/:id/resubmit',
-  wrap((req, res) => {
-    const s = wf.recurringSource(req.user, req.params.id);
+  wrap(async (req, res) => {
+    const s = await wf.recurringSource(req.user, req.params.id);
     // Everything is prefilled from the previous run; the submitter only supplies the new dates.
     const input = { ...s.data, name: s.name };
     for (const k of ['start_date', 'end_date']) input[k] = req.body[k];
     // Documents attached to the approved terms carry over unchanged.
-    const carried = savedAttachments(s);
-    const { errors, data } = wf.validate('recurring_spif', input, req.user, { fixedName: s.name });
+    const carried = await savedAttachments(s);
+    const { errors, data } = await wf.validate('recurring_spif', input, req.user, { fixedName: s.name });
     if (Object.keys(errors).length) {
       throw new UserError(Object.values(errors).join(' ') + ' Use "Resubmit with changes" to update the terms.');
     }
-    const id = wf.createRequest(req.user, 'recurring_spif', data, s.standing, [], carried);
-    const row = wf.getRequest(id);
-    notifyRequest(req, id);
+    const id = await wf.createRequest(req.user, 'recurring_spif', data, s.standing, [], carried);
+    const row = await wf.getRequest(id);
+    await notifyRequest(req, id);
     flash(
       req,
       'success',
@@ -546,13 +566,13 @@ app.post(
 app.post(
   '/saved/:id/revoke',
   requireRole('admin'),
-  wrap((req, res) => {
-    const s = wf.recurringSource(req.user, req.params.id);
+  wrap(async (req, res) => {
+    const s = await wf.recurringSource(req.user, req.params.id);
     if (!s.standing) throw new UserError('This SPIF has no half-year approval to revoke.');
-    db.prepare('UPDATE saved_spifs SET approved_indefinitely = 0, approved_through = NULL, active = 0 WHERE id = ?').run(
+    await db.prepare('UPDATE saved_spifs SET approved_indefinitely = 0, approved_through = NULL, active = 0 WHERE id = ?').run(
       s.standing.id
     );
-    audit(req.user, 'saved_spif.revoked', 'saved_spif', s.standing.id, null, {
+    await audit(req.user, 'saved_spif.revoked', 'saved_spif', s.standing.id, null, {
       name: s.name,
       through: s.standing.approved_through,
     });
@@ -565,16 +585,16 @@ app.post(
 
 app.get(
   '/reports',
-  wrap((req, res) => {
+  wrap(async (req, res) => {
     if (req.user.role !== 'admin') return res.send(views.reportsComingSoon(ctx(req)));
     const nowYear = Number(wf.todayIn(req.user.timezone).slice(0, 4));
-    const minRow = db.prepare('SELECT MIN(substr(created_at, 1, 4)) AS y FROM requests').get();
+    const minRow = await db.prepare('SELECT MIN(substr(created_at, 1, 4)) AS y FROM requests').get();
     const minYear = Math.min(minRow && minRow.y ? Number(minRow.y) : nowYear, nowYear);
     const years = [];
     for (let y = minYear; y <= nowYear + 1; y++) years.push(y);
     let year = parseInt(req.query.year, 10);
     if (!years.includes(year)) year = nowYear;
-    res.send(views.reports(ctx(req), wf.reportData(req.user, year), year, years));
+    res.send(views.reports(ctx(req), await wf.reportData(req.user, year), year, years));
   })
 );
 
@@ -582,11 +602,11 @@ app.get(
   '/audit',
   (req, res, next) =>
     ['admin', 'finance'].includes(req.user.role) || wf.isApprover(req.user) ? next() : res.status(403).send('Not allowed.'),
-  wrap((req, res) => {
+  wrap(async (req, res) => {
     const reqId = parseInt(req.query.request, 10);
     const rows = reqId
-      ? db.prepare('SELECT * FROM audit_log WHERE request_id = ? ORDER BY id DESC LIMIT 500').all(reqId)
-      : db.prepare('SELECT * FROM audit_log ORDER BY id DESC LIMIT 500').all();
+      ? await db.prepare('SELECT * FROM audit_log WHERE request_id = ? ORDER BY id DESC LIMIT 500').all(reqId)
+      : await db.prepare('SELECT * FROM audit_log ORDER BY id DESC LIMIT 500').all();
     res.send(views.auditPage(ctx(req), rows, reqId || null));
   })
 );
@@ -598,12 +618,12 @@ const ROLES = ['submitter', 'finance', 'admin'];
 app.get(
   '/admin',
   requireRole('admin'),
-  wrap((req, res) => {
+  wrap(async (req, res) => {
     res.send(
       views.admin(ctx(req), {
-        users: db.prepare('SELECT * FROM users ORDER BY active DESC, name').all(),
-        pendingRows: wf.listRequests(req.user).filter((r) => wf.PENDING.includes(r.status)),
-        saved: wf.recurringSources(req.user),
+        users: await db.prepare('SELECT * FROM users ORDER BY active DESC, name').all(),
+        pendingRows: (await wf.listRequests(req.user)).filter((r) => wf.PENDING.includes(r.status)),
+        saved: await wf.recurringSources(req.user),
       })
     );
   })
@@ -619,8 +639,8 @@ function csvCell(v) {
 app.get(
   '/admin/saved-spifs.csv',
   requireRole('admin'),
-  wrap((req, res) => {
-    const rows = db
+  wrap(async (req, res) => {
+    const rows = await db
       .prepare(
         `SELECT s.*, o.name AS owner_name, o.email AS owner_email, a.name AS approved_by_name
          FROM saved_spifs s
@@ -671,7 +691,7 @@ app.get(
           .join(',')
       );
     }
-    audit(req.user, 'saved_spif.exported', 'saved_spif', null, null, { count: rows.length });
+    await audit(req.user, 'saved_spif.exported', 'saved_spif', null, null, { count: rows.length });
     res.set({
       'Content-Type': 'text/csv; charset=utf-8',
       'Content-Disposition': `attachment; filename="saved-spifs-${new Date().toISOString().slice(0, 10)}.csv"`,
@@ -682,7 +702,7 @@ app.get(
 
 // legacy: an existing user with no reports assigned yet may be saved without them, so unrelated edits
 // (a Slack ID, a time zone) are not blocked. Picking reports is still required for new users and tier changes.
-function cleanUserInput(body, selfId, legacy) {
+async function cleanUserInput(body, selfId, legacy) {
   const name = String(body.name || '').trim();
   const email = String(body.email || '').trim().toLowerCase();
   const role = String(body.role || '');
@@ -704,41 +724,43 @@ function cleanUserInput(body, selfId, legacy) {
   // Their requests go to these people. Everyone else has none.
   let tier1Id = null;
   let tier2Id = null;
-  const pick = (field, wantTier, label) => {
+  const pick = async (field, wantTier, label) => {
     const id = Number(body[field]);
     if (legacy && !id) return null;
-    const p = id && db.prepare("SELECT id FROM users WHERE id = ? AND active = 1 AND role = 'submitter' AND tier = ?").get(id, wantTier);
+    const p = id && (await db.prepare("SELECT id FROM users WHERE id = ? AND active = 1 AND role = 'submitter' AND tier = ?").get(id, wantTier));
     if (!p || p.id === selfId) throw new UserError(`Choose a tier ${wantTier} report (${label}).`);
     return p.id;
   };
   if (role === 'submitter' && tier === 3) {
-    tier2Id = pick('tier2_id', 2, 'approver');
-    tier1Id = pick('tier1_id', 1, 'approver');
+    tier2Id = await pick('tier2_id', 2, 'approver');
+    tier1Id = await pick('tier1_id', 1, 'approver');
   } else if (role === 'submitter' && tier === 2) {
-    tier1Id = pick('tier1_id', 1, 'approver');
+    tier1Id = await pick('tier1_id', 1, 'approver');
   }
   return { name, email, role, tier, tier1Id, tier2Id, timezone, password, slackId: slackId || null };
 }
 
 function constraintToUserError(e) {
-  if (e && String(e.code).startsWith('SQLITE_CONSTRAINT')) return new UserError('That email address is already in use.');
+  if (e && (String(e.code).startsWith('SQLITE_CONSTRAINT') || /UNIQUE constraint/i.test(String(e.message)))) {
+    return new UserError('That email address is already in use.');
+  }
   return e;
 }
 
 app.post(
   '/admin/users',
   requireRole('admin'),
-  wrap((req, res) => {
-    const u = cleanUserInput(req.body);
+  wrap(async (req, res) => {
+    const u = await cleanUserInput(req.body);
     if (!u.password) throw new UserError('A temporary password is required.');
     const tier = u.role === 'admin' ? 3 : u.tier || 3;
     try {
-      const info = db
+      const info = await db
         .prepare(
           'INSERT INTO users (name, email, password_hash, role, tier, tier1_id, tier2_id, timezone, slack_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
         )
         .run(u.name, u.email, bcrypt.hashSync(u.password, 10), u.role, tier, u.tier1Id, u.tier2Id, u.timezone, u.slackId);
-      audit(req.user, 'user.created', 'user', info.lastInsertRowid, null, {
+      await audit(req.user, 'user.created', 'user', info.lastInsertRowid, null, {
         email: u.email,
         role: u.role,
         tier,
@@ -756,19 +778,19 @@ app.post(
 app.post(
   '/admin/users/:id',
   requireRole('admin'),
-  wrap((req, res) => {
+  wrap(async (req, res) => {
     const id = Number(req.params.id);
-    const before = db.prepare('SELECT * FROM users WHERE id = ?').get(id);
+    const before = await db.prepare('SELECT * FROM users WHERE id = ?').get(id);
     if (!before) return notFound(res);
     const legacy = before.role === 'submitter' && !before.tier1_id && !before.tier2_id && before.tier === Number(req.body.tier);
-    const u = cleanUserInput(req.body, id, legacy);
+    const u = await cleanUserInput(req.body, id, legacy);
     const active = req.body.active === '0' ? 0 : 1;
     if (id === req.user.id && (!active || u.role !== 'admin')) {
       throw new UserError('You cannot deactivate or demote yourself.');
     }
     const tier = u.role === 'admin' ? 3 : u.tier || before.tier;
     try {
-      db.prepare(
+      await db.prepare(
         'UPDATE users SET name = ?, email = ?, role = ?, tier = ?, tier1_id = ?, tier2_id = ?, timezone = ?, slack_id = ?, active = ? WHERE id = ?'
       ).run(
         u.name,
@@ -782,11 +804,11 @@ app.post(
         active,
         id
       );
-      if (u.password) db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(bcrypt.hashSync(u.password, 10), id);
+      if (u.password) await db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(bcrypt.hashSync(u.password, 10), id);
     } catch (e) {
       throw constraintToUserError(e);
     }
-    audit(req.user, 'user.updated', 'user', id, null, {
+    await audit(req.user, 'user.updated', 'user', id, null, {
       before: { name: before.name, email: before.email, role: before.role, tier: before.tier, active: before.active, timezone: before.timezone, slack_id: before.slack_id, tier1_id: before.tier1_id, tier2_id: before.tier2_id },
       after: { name: u.name, email: u.email, role: u.role, tier, tier1_id: u.tier1Id, tier2_id: u.tier2Id, active, timezone: u.timezone, slack_id: u.slackId },
       passwordChanged: !!u.password,
@@ -804,7 +826,12 @@ app.use((err, req, res, next) => {
   res.status(500).send('Something went wrong. The error was logged.');
 });
 
-const port = process.env.PORT || 3000;
-app.listen(port, '0.0.0.0', () => {
-  console.log(`SPIF Process listening on ${port}; data in ${dataDir}`);
-});
+// Vercel imports the app (api/index.js); `npm start` runs it as a normal server.
+if (require.main === module) {
+  const port = process.env.PORT || 3000;
+  app.listen(port, '0.0.0.0', () => {
+    console.log(`SPIF Process listening on ${port}`);
+  });
+}
+
+module.exports = app;

@@ -107,25 +107,27 @@ function hashTerms(data, files) {
     .digest('hex');
 }
 
-function attachmentsFor(requestId, version) {
+async function attachmentsFor(requestId, version) {
   if (requestId == null || version == null) return [];
   return db
     .prepare('SELECT * FROM attachments WHERE request_id = ? AND version = ? ORDER BY id')
     .all(requestId, version);
 }
 
-// Copy carried-over files and record newly uploaded ones against a request version.
-function saveAttachments(user, requestId, version, carried, uploaded) {
+// Copy carried-over files and record newly uploaded ones against a request version. An uploaded
+// record carries the file's bytes in `data`; carried-over rows share the blob they already have.
+async function saveAttachments(user, requestId, version, carried, uploaded) {
   const ins = db.prepare(
     `INSERT INTO attachments (request_id, version, field, original_name, stored_name, mime, size, sha256, uploaded_by)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
   );
   for (const f of carried) {
-    ins.run(requestId, version, f.field, f.original_name, f.stored_name, f.mime, f.size, f.sha256, f.uploaded_by);
+    await ins.run(requestId, version, f.field, f.original_name, f.stored_name, f.mime, f.size, f.sha256, f.uploaded_by);
   }
   for (const f of uploaded) {
-    ins.run(requestId, version, 'eligibility', f.original_name, f.stored_name, f.mime, f.size, f.sha256, user.id);
-    audit(user, 'attachment.added', 'request', requestId, requestId, {
+    await db.prepare('INSERT INTO attachment_blobs (stored_name, data) VALUES (?, ?)').run(f.stored_name, f.data);
+    await ins.run(requestId, version, 'eligibility', f.original_name, f.stored_name, f.mime, f.size, f.sha256, user.id);
+    await audit(user, 'attachment.added', 'request', requestId, requestId, {
       version,
       file: f.original_name,
       sha256: f.sha256,
@@ -191,10 +193,10 @@ function afterFinance(submitterTier) {
 // ---------------------------------------------------------------- validation
 
 // The monthly MBO: one rep, one amount, one month, optional description. No approvals.
-function validateMbo(input, user) {
+async function validateMbo(input, user) {
   const errors = {};
   const s = (k) => (input[k] == null ? '' : String(input[k]).replace(/\r\n/g, '\n').trim());
-  const rep = getReps().find((x) => x.name.toLowerCase() === s('mbo_rep').toLowerCase());
+  const rep = (await getReps()).find((x) => x.name.toLowerCase() === s('mbo_rep').toLowerCase());
   if (!rep) errors.mbo_rep = 'Choose a rep from the list.';
   const amount = parseMoney(s('mbo_amount'));
   if (amount == null || amount <= 0) errors.mbo_amount = 'Enter an amount greater than 0.';
@@ -220,7 +222,7 @@ function validateMbo(input, user) {
   return { errors, data: d };
 }
 
-function validate(type, input, user, opts) {
+async function validate(type, input, user, opts) {
   const { excludeId = null, fixedName = null } = opts || {};
   const errors = {};
   const d = {};
@@ -236,7 +238,7 @@ function validate(type, input, user, opts) {
   // Bonuses are either regular (full review) or the monthly MBO (no review, its own short form).
   // A recurring resubmission of a regular bonus carries bonus_kind over from the saved terms.
   const kind = type === 'bonus' || type === 'recurring_spif' ? s('bonus_kind') : '';
-  if (type === 'bonus' && kind === 'mbo') return validateMbo(input, user);
+  if (type === 'bonus' && kind === 'mbo') return await validateMbo(input, user);
   d.bonus_kind = kind === 'regular' ? 'regular' : '';
   if (type === 'bonus' && !d.bonus_kind) errors.bonus_kind = 'Choose regular bonus or monthly MBO.';
   const regularBonus = d.bonus_kind === 'regular';
@@ -246,10 +248,10 @@ function validate(type, input, user, opts) {
   d.name = fixedName || s('name');
   if (!d.name) errors.name = 'Name is required.';
   else if (!fixedName) {
-    const dupReq = db
+    const dupReq = await db
       .prepare('SELECT id FROM requests WHERE name = ? AND id != ? LIMIT 1')
       .get(d.name, excludeId == null ? -1 : excludeId);
-    const dupSaved = db.prepare('SELECT id FROM saved_spifs WHERE name = ? LIMIT 1').get(d.name);
+    const dupSaved = await db.prepare('SELECT id FROM saved_spifs WHERE name = ? LIMIT 1').get(d.name);
     if (dupReq || dupSaved) {
       errors.name = 'That name is already used. Pick a distinct name, or resubmit it from Saved recurring SPIFs.';
     }
@@ -378,7 +380,7 @@ function validate(type, input, user, opts) {
 
 // ---------------------------------------------------------------- reads
 
-function getRequest(id) {
+async function getRequest(id) {
   return db
     .prepare(
       `SELECT r.*, u.name AS submitter_name, u.role AS submitter_role, u.tier AS submitter_tier, u.tier1_id AS submitter_tier1_id, u.tier2_id AS submitter_tier2_id
@@ -387,14 +389,14 @@ function getRequest(id) {
     .get(id);
 }
 
-function getVersions(requestId) {
-  return db
+async function getVersions(requestId) {
+  const rows = await db
     .prepare(
       `SELECT v.*, u.name AS created_by_name FROM request_versions v
        JOIN users u ON u.id = v.created_by WHERE v.request_id = ? ORDER BY v.version`
     )
-    .all(requestId)
-    .map((v) => ({ ...v, data: JSON.parse(v.data_json) }));
+    .all(requestId);
+  return rows.map((v) => ({ ...v, data: JSON.parse(v.data_json) }));
 }
 
 function getSteps(requestId) {
@@ -406,8 +408,8 @@ function getSteps(requestId) {
     .all(requestId);
 }
 
-function currentData(r) {
-  const v = db
+async function currentData(r) {
+  const v = await db
     .prepare('SELECT data_json FROM request_versions WHERE request_id = ? AND version = ?')
     .get(r.id, r.current_version);
   return JSON.parse(v.data_json);
@@ -419,8 +421,8 @@ function canView(user, r) {
   return canApprove(user, r);
 }
 
-function listRequests(user) {
-  const rows = db
+async function listRequests(user) {
+  const rows = await db
     .prepare(
       `SELECT r.*, u.name AS submitter_name, u.tier AS submitter_tier, u.tier1_id AS submitter_tier1_id, u.tier2_id AS submitter_tier2_id, v.data_json
        FROM requests r
@@ -461,10 +463,10 @@ function availableActions(user, r, data) {
 // Admins can change what each rep will make, including after approval. The submitter can too, but
 // only when they chose to calculate the amounts themselves (requests from before that choice
 // existed have no value and stay editable by the submitter).
-function canEditRepAmounts(user, r) {
+async function canEditRepAmounts(user, r) {
   if (['cancelled', 'rejected'].includes(r.status)) return false;
   if (user.role === 'admin') return true;
-  const data = currentData(r);
+  const data = await currentData(r);
   // An MBO skips approval, so its amount is fixed at submission; only an admin can change it.
   if (data.bonus_kind === 'mbo') return false;
   return r.submitter_id === user.id && data.calculated_by !== 'commissions';
@@ -486,8 +488,8 @@ const REP_GROUPS = [
   { label: 'Customer Care', pods: ['Customer Care'] },
 ];
 
-function getReps() {
-  const rows = db.prepare('SELECT * FROM reps WHERE active = 1 ORDER BY name').all();
+async function getReps() {
+  const rows = await db.prepare('SELECT * FROM reps WHERE active = 1 ORDER BY name').all();
   const out = [];
   for (const g of REP_GROUPS) {
     for (const r of rows) if (g.pods.includes(r.pod)) out.push({ ...r, group: g.label });
@@ -499,26 +501,26 @@ function getRepAmounts(requestId) {
   return db.prepare('SELECT * FROM rep_amounts WHERE request_id = ? ORDER BY id').all(requestId);
 }
 
-function repAmountTotals() {
+async function repAmountTotals() {
   const out = {};
-  for (const row of db.prepare('SELECT request_id, SUM(amount) AS total FROM rep_amounts GROUP BY request_id').all()) {
+  for (const row of await db.prepare('SELECT request_id, SUM(amount) AS total FROM rep_amounts GROUP BY request_id').all()) {
     out[row.request_id] = row.total;
   }
   return out;
 }
 
-const saveRepAmounts = db.transaction((user, requestId, input) => {
-  const r = getRequest(requestId);
-  if (!r || !canEditRepAmounts(user, r)) throw new UserError('You cannot change the rep amounts on this request.');
+const saveRepAmounts = db.transaction(async (user, requestId, input) => {
+  const r = await getRequest(requestId);
+  if (!r || !(await canEditRepAmounts(user, r))) throw new UserError('You cannot change the rep amounts on this request.');
   const names = [].concat(input.rep_name || []).map((v) => String(v).trim());
   const amounts = [].concat(input.rep_amount || []).map((v) => String(v).trim());
   const notes = [].concat(input.rep_note || []).map((v) => String(v).trim());
-  const saved = getRepAmounts(requestId);
+  const saved = await getRepAmounts(requestId);
   // Names must come from the rep list. A name already on this request is kept even if that rep is
   // no longer on the list (entered before the list existed, or since deactivated).
   const known = new Map();
   for (const x of saved) known.set(x.rep_name.toLowerCase(), x.rep_name);
-  for (const x of getReps()) known.set(x.name.toLowerCase(), x.name);
+  for (const x of await getReps()) known.set(x.name.toLowerCase(), x.name);
   const rows = [];
   const seen = new Set();
   for (let i = 0; i < names.length; i++) {
@@ -536,11 +538,11 @@ const saveRepAmounts = db.transaction((user, requestId, input) => {
   const before = saved.map((x) => ({ rep: x.rep_name, amount: x.amount, note: x.note }));
   const after = rows.map((x) => ({ rep: x.rep_name, amount: x.amount, note: x.note }));
   if (JSON.stringify(before) === JSON.stringify(after)) return false;
-  db.prepare('DELETE FROM rep_amounts WHERE request_id = ?').run(requestId);
+  await db.prepare('DELETE FROM rep_amounts WHERE request_id = ?').run(requestId);
   const ins = db.prepare('INSERT INTO rep_amounts (request_id, rep_name, amount, note, updated_by) VALUES (?, ?, ?, ?, ?)');
-  for (const x of rows) ins.run(requestId, x.rep_name, x.amount, x.note, user.id);
-  db.prepare("UPDATE requests SET updated_at = datetime('now') WHERE id = ?").run(requestId);
-  audit(user, 'rep_amounts.updated', 'request', requestId, requestId, { status: r.status, before, after });
+  for (const x of rows) await ins.run(requestId, x.rep_name, x.amount, x.note, user.id);
+  await db.prepare("UPDATE requests SET updated_at = datetime('now') WHERE id = ?").run(requestId);
+  await audit(user, 'rep_amounts.updated', 'request', requestId, requestId, { status: r.status, before, after });
   return true;
 });
 
@@ -554,15 +556,15 @@ function displayStatus(r, data, tz) {
 
 // ---------------------------------------------------------------- writes
 
-function addStep(requestId, version, step, decision, reasoning, detail, userId) {
-  db.prepare(
+async function addStep(requestId, version, step, decision, reasoning, detail, userId) {
+  await db.prepare(
     'INSERT INTO approval_steps (request_id, version, step, decision, reasoning, detail, decided_by) VALUES (?, ?, ?, ?, ?, ?, ?)'
   ).run(requestId, version, step, decision, reasoning || null, detail || null, userId == null ? null : userId);
 }
 
-function setStatus(id, status, extra) {
+async function setStatus(id, status, extra) {
   const e = extra || {};
-  db.prepare(
+  await db.prepare(
     `UPDATE requests SET status = ?, classification = COALESCE(?, classification),
      classification_reasoning = COALESCE(?, classification_reasoning),
      approval_scope = COALESCE(?, approval_scope), approval_through = COALESCE(?, approval_through),
@@ -578,21 +580,21 @@ function approvalScopeFor(user, r, wantsHalfYear) {
 }
 
 // A half-year approval is remembered as a standing approval for this SPIF's name and terms.
-function recordStandingApproval(id, actor) {
-  const r = getRequest(id);
+async function recordStandingApproval(id, actor) {
+  const r = await getRequest(id);
   if (r.status !== 'approved' || r.approval_scope !== 'half_year') return;
-  const data = currentData(r);
+  const data = await currentData(r);
   const terms = JSON.stringify(termsOf(data));
-  const hash = hashTerms(data, attachmentsFor(r.id, r.current_version));
-  let saved = standingFor(r.name);
+  const hash = hashTerms(data, await attachmentsFor(r.id, r.current_version));
+  let saved = await standingFor(r.name);
   if (saved) {
-    db.prepare(
+    await db.prepare(
       `UPDATE saved_spifs SET terms_json = ?, terms_hash = ?, classification = ?, classification_reasoning = ?,
        approved_indefinitely = 0, approved_through = ?, approved_by = ?, approved_at = datetime('now'), active = 1,
        source_request_id = ?, source_version = ? WHERE id = ?`
     ).run(terms, hash, r.classification, r.classification_reasoning, r.approval_through, actor.id, r.id, r.current_version, saved.id);
   } else {
-    const info = db
+    const info = await db
       .prepare(
         `INSERT INTO saved_spifs (name, owner_id, type, terms_json, terms_hash, classification,
          classification_reasoning, approved_indefinitely, approved_through, approved_by, approved_at, source_request_id, source_version)
@@ -613,8 +615,8 @@ function recordStandingApproval(id, actor) {
       );
     saved = { id: info.lastInsertRowid };
   }
-  db.prepare('UPDATE requests SET saved_spif_id = ? WHERE id = ?').run(saved.id, id);
-  audit(actor, 'saved_spif.approved_half_year', 'saved_spif', saved.id, id, { name: r.name, through: r.approval_through });
+  await db.prepare('UPDATE requests SET saved_spif_id = ? WHERE id = ?').run(saved.id, id);
+  await audit(actor, 'saved_spif.approved_half_year', 'saved_spif', saved.id, id, { name: r.name, through: r.approval_through });
 }
 
 function standingFor(name) {
@@ -627,9 +629,9 @@ const RECURRING_TYPES = ['new_spif', 'recurring_spif', 'bonus'];
 
 // Any approved (or finalized) SPIF can be resubmitted, newest request per name. Submitters see only
 // their own; admin, finance and approvers see everyone's. Deactivated (revoked) names are hidden.
-function recurringSources(user) {
+async function recurringSources(user) {
   const privileged = ['admin', 'finance'].includes(user.role) || isApprover(user);
-  const rows = db
+  const rows = await db
     .prepare(
       `SELECT r.*, u.name AS submitter_name, v.data_json
        FROM requests r
@@ -647,7 +649,7 @@ function recurringSources(user) {
     if (seen.has(key)) continue;
     seen.add(key);
     if (JSON.parse(r.data_json).bonus_kind === 'mbo') continue;
-    const standing = standingFor(r.name);
+    const standing = await standingFor(r.name);
     if (standing && !standing.active) continue;
     out.push({ ...r, data: JSON.parse(r.data_json), standing: standing && standing.approved_through ? standing : null });
   }
@@ -656,32 +658,32 @@ function recurringSources(user) {
 
 // Takes any request id for the SPIF and resolves to its newest approved run, so a link left open on
 // an older run still works.
-function recurringSource(user, requestId) {
-  const asked = db.prepare('SELECT name FROM requests WHERE id = ?').get(Number(requestId));
-  const found = asked && recurringSources(user).find((s) => s.name.toLowerCase() === asked.name.toLowerCase());
+async function recurringSource(user, requestId) {
+  const asked = await db.prepare('SELECT name FROM requests WHERE id = ?').get(Number(requestId));
+  const found = asked && (await recurringSources(user)).find((s) => s.name.toLowerCase() === asked.name.toLowerCase());
   if (!found) throw new UserError('That SPIF was not found.');
   return found;
 }
 
 // carried: attachment rows copied from a saved SPIF; uploaded: newly uploaded file records.
-const createRequest = db.transaction((user, type, data, saved, uploaded, carried) => {
+const createRequest = db.transaction(async (user, type, data, saved, uploaded, carried) => {
   if (!TYPES[type]) throw new UserError('Unknown request type.');
   const up = uploaded || [];
   const carry = carried || [];
   const hash = hashTerms(data, [...carry, ...up]);
 
-  const info = db
+  const info = await db
     .prepare(
       `INSERT INTO requests (type, name, submitter_id, status, saved_spif_id)
        VALUES (?, ?, ?, ?, ?)`
     )
     .run(type, data.name, user.id, 'finance_review', saved ? saved.id : null);
   const id = Number(info.lastInsertRowid);
-  db.prepare(
+  await db.prepare(
     'INSERT INTO request_versions (request_id, version, data_json, terms_hash, created_by) VALUES (?, 1, ?, ?, ?)'
   ).run(id, JSON.stringify(data), hash, user.id);
-  saveAttachments(user, id, 1, carry, up);
-  audit(user, 'request.submitted', 'request', id, id, { type, name: data.name, version: 1 });
+  await saveAttachments(user, id, 1, carry, up);
+  await audit(user, 'request.submitted', 'request', id, id, { type, name: data.name, version: 1 });
 
   // Terms unchanged from a half-year approval that still covers the whole run: finance and approver
   // steps are covered. Everything else (a one-month approval, changed terms, a run past the
@@ -695,67 +697,67 @@ const createRequest = db.transaction((user, type, data, saved, uploaded, carried
     data.end_date <= saved.approved_through
   ) {
     const note = `Terms unchanged from saved SPIF #${saved.id}, approved through ${saved.approved_through}`;
-    addStep(id, 1, 'finance', 'skipped', note, 'inherited classification: ' + (saved.classification || 'none'), null);
-    addStep(id, 1, 'approver', 'skipped', note, 'half-year approval', null);
-    setStatus(id, 'approved', {
+    await addStep(id, 1, 'finance', 'skipped', note, 'inherited classification: ' + (saved.classification || 'none'), null);
+    await addStep(id, 1, 'approver', 'skipped', note, 'half-year approval', null);
+    await setStatus(id, 'approved', {
       classification: saved.classification,
       reasoning: saved.classification_reasoning,
       scope: 'half_year',
       through: saved.approved_through,
     });
-    audit(null, 'request.auto_approved_steps', 'request', id, id, { savedSpifId: saved.id, status: 'approved' });
+    await audit(null, 'request.auto_approved_steps', 'request', id, id, { savedSpifId: saved.id, status: 'approved' });
   }
   return id;
 });
 
 // The monthly MBO is approved on submission: finance and approver steps are recorded as skipped,
 // and the rep's amount goes straight into the rep amounts.
-const createMbo = db.transaction((user, data) => {
+const createMbo = db.transaction(async (user, data) => {
   const base = data.name;
   let name = base;
-  for (let n = 2; db.prepare('SELECT 1 FROM requests WHERE name = ?').get(name); n++) name = `${base} (${n})`;
+  for (let n = 2; await db.prepare('SELECT 1 FROM requests WHERE name = ?').get(name); n++) name = `${base} (${n})`;
   data.name = name;
-  const info = db
+  const info = await db
     .prepare(`INSERT INTO requests (type, name, submitter_id, status, approval_scope) VALUES ('bonus', ?, ?, 'approved', 'once')`)
     .run(name, user.id);
   const id = Number(info.lastInsertRowid);
-  db.prepare(
+  await db.prepare(
     'INSERT INTO request_versions (request_id, version, data_json, terms_hash, created_by) VALUES (?, 1, ?, ?, ?)'
   ).run(id, JSON.stringify(data), hashTerms(data, []), user.id);
-  audit(user, 'request.submitted', 'request', id, id, { type: 'bonus', kind: 'mbo', name, version: 1 });
+  await audit(user, 'request.submitted', 'request', id, id, { type: 'bonus', kind: 'mbo', name, version: 1 });
   const note = 'Monthly MBO does not need approval';
-  addStep(id, 1, 'finance', 'skipped', note, 'monthly MBO', null);
-  addStep(id, 1, 'approver', 'skipped', note, 'monthly MBO', null);
-  db.prepare('INSERT INTO rep_amounts (request_id, rep_name, amount, note, updated_by) VALUES (?, ?, ?, ?, ?)').run(
+  await addStep(id, 1, 'finance', 'skipped', note, 'monthly MBO', null);
+  await addStep(id, 1, 'approver', 'skipped', note, 'monthly MBO', null);
+  await db.prepare('INSERT INTO rep_amounts (request_id, rep_name, amount, note, updated_by) VALUES (?, ?, ?, ?, ?)').run(
     id,
     data.mbo_rep,
     data.mbo_amount,
     null,
     user.id
   );
-  audit(null, 'request.auto_approved_steps', 'request', id, id, { kind: 'mbo', status: 'approved' });
+  await audit(null, 'request.auto_approved_steps', 'request', id, id, { kind: 'mbo', status: 'approved' });
   return id;
 });
 
-const resubmitRequest = db.transaction((user, id, data, uploaded, carried) => {
-  const r = getRequest(id);
+const resubmitRequest = db.transaction(async (user, id, data, uploaded, carried) => {
+  const r = await getRequest(id);
   if (!r || r.submitter_id !== user.id) throw new UserError('Request not found.');
   if (r.status !== 'returned') throw new UserError('Only returned requests can be edited.');
   const version = r.current_version + 1;
-  db.prepare(
+  await db.prepare(
     'INSERT INTO request_versions (request_id, version, data_json, terms_hash, created_by) VALUES (?, ?, ?, ?, ?)'
   ).run(id, version, JSON.stringify(data), hashTerms(data, [...(carried || []), ...(uploaded || [])]), user.id);
-  saveAttachments(user, id, version, carried || [], uploaded || []);
-  db.prepare(
+  await saveAttachments(user, id, version, carried || [], uploaded || []);
+  await db.prepare(
     `UPDATE requests SET current_version = ?, name = ?, status = ?, classification = NULL,
      classification_reasoning = NULL, approval_scope = NULL, approval_through = NULL, finance_concern = NULL,
      updated_at = datetime('now') WHERE id = ?`
   ).run(version, data.name, 'finance_review', id);
-  audit(user, 'request.resubmitted', 'request', id, id, { version });
+  await audit(user, 'request.resubmitted', 'request', id, id, { version });
 });
 
-const financeDecide = db.transaction((user, id, input) => {
-  const r = getRequest(id);
+const financeDecide = db.transaction(async (user, id, input) => {
+  const r = await getRequest(id);
   if (!r) throw new UserError('Request not found.');
   if (r.status !== 'finance_review') throw new UserError('This request is not awaiting finance.');
   if (!['finance', 'admin'].includes(user.role)) throw new UserError('Only finance can classify requests.');
@@ -777,10 +779,10 @@ const financeDecide = db.transaction((user, id, input) => {
     // Tier 1 requests end here, so finance also picks the scope; otherwise the approver does.
     const { scope, through } =
       next === 'approved' ? approvalScopeFor(user, r, input.scope === 'half_year') : { scope: null, through: null };
-    addStep(id, r.current_version, 'finance', 'approved', reasoning, input.classification, user.id);
-    setStatus(id, next, { classification: input.classification, reasoning, scope, through });
-    if (concern) db.prepare('UPDATE requests SET finance_concern = ? WHERE id = ?').run(concern, id);
-    audit(user, 'finance.classified', 'request', id, id, {
+    await addStep(id, r.current_version, 'finance', 'approved', reasoning, input.classification, user.id);
+    await setStatus(id, next, { classification: input.classification, reasoning, scope, through });
+    if (concern) await db.prepare('UPDATE requests SET finance_concern = ? WHERE id = ?').run(concern, id);
+    await audit(user, 'finance.classified', 'request', id, id, {
       classification: input.classification,
       reasoning,
       concern,
@@ -788,14 +790,14 @@ const financeDecide = db.transaction((user, id, input) => {
       through,
       next,
     });
-    recordStandingApproval(id, user);
+    await recordStandingApproval(id, user);
   } else {
     throw new UserError('Unknown action.');
   }
 });
 
-const approverDecide = db.transaction((user, id, input) => {
-  const r = getRequest(id);
+const approverDecide = db.transaction(async (user, id, input) => {
+  const r = await getRequest(id);
   if (!r) throw new UserError('Request not found.');
   if (r.status !== 'approver_review') throw new UserError('This request is not awaiting the approver.');
   if (!canApprove(user, r)) {
@@ -809,24 +811,24 @@ const approverDecide = db.transaction((user, id, input) => {
   // approving on the first one.
   if (action === 'approve_once' || action === 'approve_half_year') {
     const { scope, through } = approvalScopeFor(user, r, action === 'approve_half_year');
-    addStep(id, r.current_version, 'approver', 'approved', reasoning, through ? `${scope} through ${through}` : scope, user.id);
-    setStatus(id, 'approved', { scope, through });
-    audit(user, 'approver.approved', 'request', id, id, { scope, through, reasoning });
-    recordStandingApproval(id, user);
+    await addStep(id, r.current_version, 'approver', 'approved', reasoning, through ? `${scope} through ${through}` : scope, user.id);
+    await setStatus(id, 'approved', { scope, through });
+    await audit(user, 'approver.approved', 'request', id, id, { scope, through, reasoning });
+    await recordStandingApproval(id, user);
   } else if (action === 'return' || action === 'reject') {
     if (reasoning.length < 10) throw new UserError('A reason is required (at least 10 characters).');
     const decision = action === 'return' ? 'returned' : 'rejected';
-    addStep(id, r.current_version, 'approver', decision, reasoning, null, user.id);
-    setStatus(id, action === 'return' ? 'returned' : 'rejected');
-    audit(user, 'approver.' + decision, 'request', id, id, { reasoning });
+    await addStep(id, r.current_version, 'approver', decision, reasoning, null, user.id);
+    await setStatus(id, action === 'return' ? 'returned' : 'rejected');
+    await audit(user, 'approver.' + decision, 'request', id, id, { reasoning });
   } else {
     throw new UserError('Unknown action.');
   }
 });
 
 // Admin override: skip the step the request is currently waiting on.
-const adminSkip = db.transaction((user, id, input) => {
-  const r = getRequest(id);
+const adminSkip = db.transaction(async (user, id, input) => {
+  const r = await getRequest(id);
   if (!r) throw new UserError('Request not found.');
   if (user.role !== 'admin') throw new UserError('Only admins can skip a step.');
   if (r.submitter_id === user.id) throw new UserError('You cannot skip steps on your own request.');
@@ -837,25 +839,25 @@ const adminSkip = db.transaction((user, id, input) => {
   const stepName = { finance_review: 'finance', approver_review: 'approver', second_signoff: 'second_signoff' }[r.status];
   // Skipping finance moves a request on to its approver (tier 1 has none); skipping the approver completes it.
   const next = r.status === 'finance_review' ? afterFinance(r.submitter_tier) : 'approved';
-  addStep(id, r.current_version, stepName, 'skipped', reasoning, 'admin override', user.id);
-  setStatus(id, next);
-  audit(user, 'admin.skipped_step', 'request', id, id, { step: stepName, reasoning, next });
+  await addStep(id, r.current_version, stepName, 'skipped', reasoning, 'admin override', user.id);
+  await setStatus(id, next);
+  await audit(user, 'admin.skipped_step', 'request', id, id, { step: stepName, reasoning, next });
 });
 
-const cancelRequest = db.transaction((user, id, input) => {
-  const r = getRequest(id);
+const cancelRequest = db.transaction(async (user, id, input) => {
+  const r = await getRequest(id);
   if (!r) throw new UserError('Request not found.');
   const allowed = r.submitter_id === user.id || user.role === 'admin';
   if (!allowed) throw new UserError('You cannot cancel this request.');
   if (!PENDING.includes(r.status) && r.status !== 'returned') throw new UserError('This request can no longer be cancelled.');
-  setStatus(id, 'cancelled');
-  audit(user, 'request.cancelled', 'request', id, id, { reason: String(input.reason || '').trim() || null });
+  await setStatus(id, 'cancelled');
+  await audit(user, 'request.cancelled', 'request', id, id, { reason: String(input.reason || '').trim() || null });
 });
 
-const submitResults = db.transaction((user, id, input) => {
-  const r = getRequest(id);
+const submitResults = db.transaction(async (user, id, input) => {
+  const r = await getRequest(id);
   if (!r || r.submitter_id !== user.id) throw new UserError('Request not found.');
-  const data = currentData(r);
+  const data = await currentData(r);
   if (r.status !== 'approved' || r.type === 'adjustment') throw new UserError('Results cannot be submitted for this request.');
   if (todayIn(user.timezone) <= data.end_date) throw new UserError('Results can be submitted after the run ends.');
   const spend = parseMoney(input.actual_spend);
@@ -867,21 +869,21 @@ const submitResults = db.transaction((user, id, input) => {
     deals = parseInt(input.deals_count, 10);
     if (isNaN(deals) || deals < 0) throw new UserError('Deals must be a whole number.');
   }
-  db.prepare('INSERT INTO results (request_id, actual_spend, deals_count, notes, submitted_by) VALUES (?, ?, ?, ?, ?)').run(
+  await db.prepare('INSERT INTO results (request_id, actual_spend, deals_count, notes, submitted_by) VALUES (?, ?, ?, ?, ?)').run(
     id,
     spend,
     deals,
     notes,
     user.id
   );
-  setStatus(id, 'finalized');
-  audit(user, 'results.submitted', 'request', id, id, { actual_spend: spend, deals_count: deals });
+  await setStatus(id, 'finalized');
+  await audit(user, 'results.submitted', 'request', id, id, { actual_spend: spend, deals_count: deals });
 });
 
 // ---------------------------------------------------------------- reports
 
-function reportData(user, year) {
-  const rows = db
+async function reportData(user, year) {
+  const rows = (await db
     .prepare(
       `SELECT r.id, r.type, r.name, r.status, r.created_at, r.submitter_id, u.name AS submitter_name, u.tier AS submitter_tier, u.tier1_id AS submitter_tier1_id, u.tier2_id AS submitter_tier2_id,
               v.data_json, res.actual_spend
@@ -892,7 +894,7 @@ function reportData(user, year) {
        WHERE r.status IN ('approved', 'finalized')
        ORDER BY r.id`
     )
-    .all()
+    .all())
     .filter((r) => canView(user, r))
     .map((r) => {
       const data = JSON.parse(r.data_json);

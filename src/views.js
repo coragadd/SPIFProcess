@@ -1,5 +1,5 @@
 'use strict';
-const { TYPES, STATUS_LABELS, TIMEZONES, GROUPS, PODS, displayStatus, halfYearLabel, todayIn, getReps } = require('./workflow');
+const { TYPES, STATUS_LABELS, TIMEZONES, GROUPS, PODS, displayStatus, halfYearLabel, todayIn } = require('./workflow');
 
 const esc = (s) =>
   String(s == null ? '' : s)
@@ -308,7 +308,7 @@ function requestForm(ctx, o) {
         })}
       <div data-bonus-group="mbo"${isMbo ? '' : ' hidden'}>
         <div class="flash info">The monthly MBO is approved when you submit it. Choose the rep, the amount and the month.</div>
-        <div class="field${errors.mbo_rep ? ' has-error' : ''}"><label for="mbo_rep">Rep</label>${repPicker('mbo_rep', o.reps || getReps(), values.mbo_rep, 'mbo_rep')}${errors.mbo_rep ? `<div class="err">${esc(errors.mbo_rep)}</div>` : ''}</div>
+        <div class="field${errors.mbo_rep ? ' has-error' : ''}"><label for="mbo_rep">Rep</label>${repPicker('mbo_rep', o.reps || [], values.mbo_rep, 'mbo_rep')}${errors.mbo_rep ? `<div class="err">${esc(errors.mbo_rep)}</div>` : ''}</div>
         ${input('mbo_amount', 'Amount ($)', values, errors, { type: 'number', step: '0.01' })}
         ${input('mbo_month', 'Month', values, errors, { type: 'month' })}
         ${textarea('mbo_description', 'Description (optional)', values, errors, { rows: 3 })}
