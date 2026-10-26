@@ -56,9 +56,30 @@ function toFinance(text) {
 
 const toCommission = (text) => send(process.env.SLACK_COMMISSION_CHANNEL_ID, text, 'the commission channel (SLACK_COMMISSION_CHANNEL_ID)');
 
+// DMs open the conversation with the person first (conversations.open, needs the im:write scope)
+// and post to the DM channel Slack returns, which is more dependable than posting to a user ID.
 function dm(userId, text) {
   const u = db.prepare('SELECT name, slack_id FROM users WHERE id = ? AND active = 1').get(userId);
-  if (u) send(u.slack_id, text, `${u.name} (no Slack member ID saved in Admin)`);
+  if (!u) return;
+  const token = process.env.SLACK_BOT_TOKEN;
+  if (!token) return console.warn(`Slack: not sending to ${u.name}, SLACK_BOT_TOKEN is not set.`);
+  if (!u.slack_id) return console.warn(`Slack: not sending to ${u.name} (no Slack member ID saved in Admin).`);
+  const api = process.env.SLACK_API_URL || 'https://slack.com/api';
+  const call = (method, payload) =>
+    fetch(`${api}/${method}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify(payload),
+    }).then((res) => res.json());
+  call('conversations.open', { users: u.slack_id })
+    .then((open) => {
+      if (!open.ok) throw new Error(`conversations.open: ${open.error}${open.needed ? ' (needs scope ' + open.needed + ')' : ''}`);
+      return call('chat.postMessage', { channel: open.channel.id, text });
+    })
+    .then((sent) => {
+      if (!sent.ok) throw new Error(`chat.postMessage: ${sent.error}`);
+    })
+    .catch((e) => console.error(`Slack DM to ${u.name} (${u.slack_id}) failed: ${e.message}`));
 }
 
 // The approvers assigned to this submitter (their tier 1 and tier 2 reports). Submitters with none
