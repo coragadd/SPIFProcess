@@ -11,6 +11,13 @@ const wf = require('./workflow');
 // Nothing is sent to the sales leadership channel. Sending never throws: a Slack outage must not
 // block a submission or an approval.
 
+// One line at startup so the deploy log shows which Slack settings the app can see.
+console.log(
+  `Slack: bot token ${process.env.SLACK_BOT_TOKEN ? 'set' : 'NOT set'}, finance channel ${
+    process.env.SLACK_FINANCE_CHANNEL_ID ? 'set' : 'NOT set'
+  }, commission channel ${process.env.SLACK_COMMISSION_CHANNEL_ID ? 'set' : 'NOT set'}.`
+);
+
 function baseUrl(req) {
   return (
     process.env.APP_URL ||
@@ -25,6 +32,8 @@ function post(url, headers, payload, label) {
       const body = res.ok && headers.Authorization ? await res.json().catch(() => ({})) : {};
       if (!res.ok || (headers.Authorization && !body.ok)) {
         console.error(`Slack notification to ${label} failed:`, res.status, body.error || '');
+      } else {
+        console.log(`Slack: message sent to ${label}.`);
       }
     })
     .catch((e) => console.error(`Slack notification to ${label} failed:`, e.message));
@@ -78,6 +87,7 @@ function dm(userId, text) {
     })
     .then((sent) => {
       if (!sent.ok) throw new Error(`chat.postMessage: ${sent.error}`);
+      console.log(`Slack: DM sent to ${u.name} (${u.slack_id}).`);
     })
     .catch((e) => console.error(`Slack DM to ${u.name} (${u.slack_id}) failed: ${e.message}`));
 }
@@ -102,6 +112,7 @@ function notifyRequest(req, id) {
     const r = wf.getRequest(id);
     if (!r) return;
     const data = wf.currentData(r);
+    console.log(`Slack: request ${r.id} is now ${r.status}.`);
     const link = `<${baseUrl(req)}/requests/${r.id}|${r.name}>`;
     const type = wf.TYPES[r.type] || r.type;
     const concern = r.finance_concern ? `\n*Finance concern:* ${r.finance_concern}` : '';
