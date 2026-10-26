@@ -680,7 +680,9 @@ app.get(
   })
 );
 
-function cleanUserInput(body, selfId) {
+// legacy: an existing user with no reports assigned yet may be saved without them, so unrelated edits
+// (a Slack ID, a time zone) are not blocked. Picking reports is still required for new users and tier changes.
+function cleanUserInput(body, selfId, legacy) {
   const name = String(body.name || '').trim();
   const email = String(body.email || '').trim().toLowerCase();
   const role = String(body.role || '');
@@ -704,6 +706,7 @@ function cleanUserInput(body, selfId) {
   let tier2Id = null;
   const pick = (field, wantTier, label) => {
     const id = Number(body[field]);
+    if (legacy && !id) return null;
     const p = id && db.prepare("SELECT id FROM users WHERE id = ? AND active = 1 AND role = 'submitter' AND tier = ?").get(id, wantTier);
     if (!p || p.id === selfId) throw new UserError(`Choose a tier ${wantTier} report (${label}).`);
     return p.id;
@@ -757,7 +760,8 @@ app.post(
     const id = Number(req.params.id);
     const before = db.prepare('SELECT * FROM users WHERE id = ?').get(id);
     if (!before) return notFound(res);
-    const u = cleanUserInput(req.body, id);
+    const legacy = before.role === 'submitter' && !before.tier1_id && !before.tier2_id && before.tier === Number(req.body.tier);
+    const u = cleanUserInput(req.body, id, legacy);
     const active = req.body.active === '0' ? 0 : 1;
     if (id === req.user.id && (!active || u.role !== 'admin')) {
       throw new UserError('You cannot deactivate or demote yourself.');
