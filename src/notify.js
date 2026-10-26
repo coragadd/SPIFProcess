@@ -7,6 +7,7 @@ const wf = require('./workflow');
 //   SLACK_FINANCE_CHANNEL_ID     where "needs finance action" goes
 //   SLACK_COMMISSION_CHANNEL_ID  where "needs the commissions team" goes
 //   users.slack_id               set per user in Admin; DMs go to the approver or the submitter
+//   SLACK_BOT_NAME               optional; overrides the sender name on each message (needs the chat:write.customize scope)
 //   SLACK_WEBHOOK_URL            legacy finance-channel webhook, used only while no bot token is set
 // Nothing is sent to the sales leadership channel. Sending never throws: a Slack outage must not
 // block a submission or an approval.
@@ -17,6 +18,8 @@ console.log(
     process.env.SLACK_FINANCE_CHANNEL_ID ? 'set' : 'NOT set'
   }, commission channel ${process.env.SLACK_COMMISSION_CHANNEL_ID ? 'set' : 'NOT set'}.`
 );
+
+const botName = () => (process.env.SLACK_BOT_NAME ? { username: process.env.SLACK_BOT_NAME } : {});
 
 function baseUrl(req) {
   return (
@@ -46,7 +49,7 @@ function send(target, text, what) {
   if (!token) return console.warn(`Slack: not sending to ${what}, SLACK_BOT_TOKEN is not set.`);
   if (!target) return console.warn(`Slack: not sending to ${what}, its ID is not set.`);
   try {
-    post((process.env.SLACK_API_URL || 'https://slack.com/api') + '/chat.postMessage', { Authorization: `Bearer ${token}` }, { channel: target, text }, target);
+    post((process.env.SLACK_API_URL || 'https://slack.com/api') + '/chat.postMessage', { Authorization: `Bearer ${token}` }, { channel: target, text, ...botName() }, target);
   } catch (e) {
     console.error('Slack notification failed:', e.message);
   }
@@ -83,7 +86,7 @@ function dm(userId, text) {
   call('conversations.open', { users: u.slack_id })
     .then((open) => {
       if (!open.ok) throw new Error(`conversations.open: ${open.error}${open.needed ? ' (needs scope ' + open.needed + ')' : ''}`);
-      return call('chat.postMessage', { channel: open.channel.id, text });
+      return call('chat.postMessage', { channel: open.channel.id, text, ...botName() });
     })
     .then((sent) => {
       if (!sent.ok) throw new Error(`chat.postMessage: ${sent.error}`);
