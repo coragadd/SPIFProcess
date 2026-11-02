@@ -44,7 +44,9 @@ async function post(url, headers, payload, label) {
     if (!res.ok || (headers.Authorization && !body.ok)) {
       console.error(`Slack notification to ${label} failed:`, res.status, body.error || '');
     } else {
-      console.log(`Slack: message sent to ${label}.`);
+      const m = body.message || {};
+      const who = m.bot_profile ? ` as "${m.bot_profile.name}" (app ${m.bot_profile.app_id || m.app_id}, bot ${m.bot_id})` : '';
+      console.log(`Slack: message sent to ${label}${who}.`);
     }
   } catch (e) {
     console.error(`Slack notification to ${label} failed:`, e.message);
@@ -90,7 +92,8 @@ async function dm(userId, text) {
     if (!open.ok) throw new Error(`conversations.open: ${open.error}${open.needed ? ' (needs scope ' + open.needed + ')' : ''}`);
     const sent = await call('chat.postMessage', { channel: open.channel.id, text, ...botName() });
     if (!sent.ok) throw new Error(`chat.postMessage: ${sent.error}`);
-    console.log(`Slack: DM sent to ${u.name} (${u.slack_id}).`);
+    const bp = (sent.message || {}).bot_profile;
+    console.log(`Slack: DM sent to ${u.name} (${u.slack_id})${bp ? ` as "${bp.name}" (app ${bp.app_id})` : ''}.`);
   } catch (e) {
     console.error(`Slack DM to ${u.name} (${u.slack_id}) failed: ${e.message}`);
   }
