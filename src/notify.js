@@ -17,7 +17,9 @@ const wf = require('./workflow');
 console.log(
   `Slack: bot token ${process.env.SLACK_BOT_TOKEN ? 'set' : 'NOT set'}, finance channel ${
     process.env.SLACK_FINANCE_CHANNEL_ID ? 'set' : 'NOT set'
-  }, commission channel ${process.env.SLACK_COMMISSION_CHANNEL_ID ? 'set' : 'NOT set'}.`
+  }, commission channel ${process.env.SLACK_COMMISSION_CHANNEL_ID ? 'set' : 'NOT set'}, bot name override ${
+    process.env.SLACK_BOT_NAME ? `"${process.env.SLACK_BOT_NAME}"` : 'NOT set'
+  }.`
 );
 
 const botName = () => (process.env.SLACK_BOT_NAME ? { username: process.env.SLACK_BOT_NAME } : {});
