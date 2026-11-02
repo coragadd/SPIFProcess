@@ -48,7 +48,8 @@ async function post(url, headers, payload, label) {
     } else {
       const m = body.message || {};
       const who = m.bot_profile ? ` as "${m.bot_profile.name}" (app ${m.bot_profile.app_id || m.app_id}, bot ${m.bot_id})` : '';
-      console.log(`Slack: message sent to ${label}${who}.`);
+      const scopes = res.headers.get('x-oauth-scopes');
+      console.log(`Slack: message sent to ${label}${who}${headers.Authorization ? `, username shown "${m.username}", token scopes: ${scopes}` : ''}.`);
     }
   } catch (e) {
     console.error(`Slack notification to ${label} failed:`, e.message);
