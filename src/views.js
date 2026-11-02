@@ -476,7 +476,7 @@ function requestDetail(ctx, o) {
           <option value="capitalizable">Capitalizable</option>
           <option value="expense"${isAdj ? ' selected' : ''}>Expense</option>
         </select></div>
-      ${reasoningBox(true)}
+      <div class="field"><label>Reasoning (optional)</label><textarea name="reasoning" rows="3"></textarea></div>
       <div class="field"><label class="check"><input type="checkbox" name="has_concern" value="1" id="has-concern"> Report a concern</label></div>
       <div class="field" id="concern-wrap" hidden>
         <label for="concern">Concern</label>

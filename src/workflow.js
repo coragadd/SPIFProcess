@@ -769,7 +769,6 @@ const financeDecide = db.transaction(async (user, id, input) => {
   // concern, which stays on the request for the approver and the submitter to read.
   if (action === 'classify') {
     if (!['capitalizable', 'expense'].includes(input.classification)) throw new UserError('Choose capitalizable or expense.');
-    if (reasoning.length < 10) throw new UserError('Finance reasoning is required (at least 10 characters).');
     let concern = null;
     if (input.has_concern) {
       concern = String(input.concern || '').replace(/\r\n/g, '\n').trim();
