@@ -347,6 +347,11 @@ function ready() {
       if (!cols.includes('entra_oid')) {
         await client.execute('ALTER TABLE users ADD COLUMN entra_oid TEXT');
       }
+      // 1 when an admin made the decision on someone's behalf (shown as "(admin)").
+      const stepCols = (await client.execute('PRAGMA table_info(approval_steps)')).rows.map((c) => c.name);
+      if (!stepCols.includes('by_admin')) {
+        await client.execute('ALTER TABLE approval_steps ADD COLUMN by_admin INTEGER NOT NULL DEFAULT 0');
+      }
       await seedReps();
       await seedAdmin();
     })().catch((e) => {

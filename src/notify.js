@@ -117,7 +117,8 @@ async function approversFor(r) {
 }
 
 // Call after anything that changes a request's status. Routes by where the request is now.
-async function notifyRequest(req, id) {
+// actor is the signed-in user who just acted; when that is an admin, the messages say so.
+async function notifyRequest(req, id, actor) {
   try {
     const r = await wf.getRequest(id);
     if (!r) return;
@@ -126,25 +127,26 @@ async function notifyRequest(req, id) {
     const link = `<${baseUrl(req)}/requests/${r.id}|${r.name}>`;
     const type = wf.TYPES[r.type] || r.type;
     const concern = r.finance_concern ? `\n*Finance concern:* ${r.finance_concern}` : '';
+    const byAdmin = actor && actor.role === 'admin' ? `\n_Action taken by an admin (${actor.name}) on behalf of the reviewer._` : '';
 
     if (r.status === 'finance_review') {
       await toFinance(`*${type} needs finance action:* ${link}\nSubmitted by ${r.submitter_name}`);
     } else if (r.status === 'approver_review') {
       const approvers = await approversFor(r);
       await Promise.all([
-        ...approvers.map((a) => dm(a.id, `*${type} needs your approval:* ${link}\nSubmitted by ${r.submitter_name}${concern}`)),
-        dm(r.submitter_id, `Finance has reviewed your ${type} ${link}. It is now with the approver.${concern}`),
+        ...approvers.map((a) => dm(a.id, `*${type} needs your approval:* ${link}\nSubmitted by ${r.submitter_name}${concern}${byAdmin}`)),
+        dm(r.submitter_id, `Finance has reviewed your ${type} ${link}. It is now with the approver.${concern}${byAdmin}`),
       ]);
     } else if (r.status === 'approved' && data.bonus_kind === 'mbo') {
       // A monthly MBO is approved on submission and sends no Slack messages.
     } else if (r.status === 'approved') {
-      const through = r.approval_scope === 'half_year' && r.approval_through ? ` through ${wf.halfYearLabel(r.approval_through)}` : '';
-      await dm(r.submitter_id, `Your ${type} ${link} was approved${through}.`);
+      const through = ['quarter', 'half_year'].includes(r.approval_scope) && r.approval_through ? ` through ${wf.dateLabel(r.approval_through)}` : '';
+      await dm(r.submitter_id, `Your ${type} ${link} was approved${through}.${byAdmin}`);
       if (data.calculated_by === 'commissions') {
-        await toCommission(`*${type} approved, commissions team to calculate the payout amounts:* ${link}\nSubmitted by ${r.submitter_name}`);
+        await toCommission(`*${type} approved, commissions team to calculate the payout amounts:* ${link}\nSubmitted by ${r.submitter_name}${byAdmin}`);
       }
     } else if (r.status === 'returned' || r.status === 'rejected') {
-      await dm(r.submitter_id, `Your ${type} ${link} was ${r.status === 'returned' ? 'returned to you for changes' : 'rejected'}. Open it to see the reason.`);
+      await dm(r.submitter_id, `Your ${type} ${link} was ${r.status === 'returned' ? 'returned to you for changes' : 'rejected'}. Open it to see the reason.${byAdmin}`);
     }
   } catch (e) {
     console.error('Slack notification failed:', e.message);
@@ -156,10 +158,10 @@ async function notifyRepAmounts(req, id, user) {
   try {
     const r = await wf.getRequest(id);
     if (!r || !['approved', 'finalized'].includes(r.status) || r.submitter_id !== user.id) return;
-    await toCommission(`*Rep amounts updated by ${user.name}:* <${baseUrl(req)}/requests/${r.id}|${r.name}>`);
+    await toCommission(`*Rep amounts updated by ${user.name}${user.role === 'admin' ? ' (admin)' : ''}:* <${baseUrl(req)}/requests/${r.id}|${r.name}>`);
   } catch (e) {
     console.error('Slack notification failed:', e.message);
   }
 }
 
-module.exports = { notifyRequest, notifyRepAmounts };
+module.exports = { notifyRequest, notifyRepAmounts, dm, baseUrl };

@@ -11,6 +11,8 @@ const wf = require('./workflow');
 const views = require('./views');
 const sso = require('./sso');
 const { notifyRequest, notifyRepAmounts } = require('./notify');
+const { parseAmountsFile } = require('./amountsFile');
+const { runReminders } = require('./reminders');
 
 const { UserError } = wf;
 
@@ -67,15 +69,42 @@ app.use(async (req, res, next) => {
   try {
     if (!req.session.csrf) req.session.csrf = crypto.randomBytes(24).toString('hex');
     req.user = null;
+    req.realUser = null;
+    req.viewingAs = false;
     if (req.session.uid) {
       const u = await db.prepare('SELECT * FROM users WHERE id = ? AND active = 1').get(req.session.uid);
-      if (u) req.user = u;
-      else req.session = { csrf: req.session.csrf };
+      if (u) {
+        req.user = u;
+        req.realUser = u;
+        // "View as": only a signed-in admin can have it, and the page is then rendered and authorized as
+        // the chosen user. It is strictly read-only (see the next middleware).
+        if (req.session.viewAs) {
+          const v = u.role === 'admin' ? await db.prepare('SELECT * FROM users WHERE id = ? AND active = 1').get(req.session.viewAs) : null;
+          if (v && v.id !== u.id) {
+            req.user = v;
+            req.viewingAs = true;
+          } else {
+            req.session.viewAs = null;
+          }
+        }
+      } else req.session = { csrf: req.session.csrf };
     }
     next();
   } catch (e) {
     next(e);
   }
+});
+
+// While viewing as another user nothing can be changed: every write is refused, so "View as" can
+// never be used to approve, classify or submit under someone else's name, or to dodge the
+// "(admin)" attribution. The only writes allowed are switching or leaving the view, and signing out.
+const VIEW_AS_WRITES = ['/view-as', '/view-as/stop', '/logout'];
+app.use((req, res, next) => {
+  if (req.viewingAs && !['GET', 'HEAD'].includes(req.method) && !VIEW_AS_WRITES.includes(req.path)) {
+    req.session.flash = { type: 'error', msg: `You are viewing as ${req.user.name}. Changes are turned off in this mode. Exit "View as" to make changes as yourself.` };
+    return res.redirect(req.get('Referer') || '/');
+  }
+  next();
 });
 
 function csrfOk(req) {
@@ -86,7 +115,7 @@ function csrfOk(req) {
 
 // Multipart bodies are not parsed yet at this point, so only the routes that accept file
 // uploads may receive them, and each of those checks the token itself after parsing.
-const MULTIPART_ROUTES = [/^\/requests$/, /^\/requests\/\d+\/edit$/];
+const MULTIPART_ROUTES = [/^\/requests$/, /^\/requests\/\d+\/edit$/, /^\/requests\/\d+\/rep-amounts$/];
 
 app.use((req, res, next) => {
   if (req.method === 'POST') {
@@ -117,9 +146,30 @@ const uploader = multer({
   },
 }).array('eligibility_files', MAX_FILES);
 
+// Rep amounts form: an optional spreadsheet of amounts plus proof of the submitter's calculations.
+const amountsUploader = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: MAX_TOTAL_BYTES, files: MAX_FILES + 1 },
+  fileFilter: (req, file, cb) => {
+    const ext = path.extname(file.originalname || '').toLowerCase();
+    if (file.fieldname === 'amounts_file') {
+      if (!['.xlsx', '.csv'].includes(ext)) return cb(new UserError('The rep amounts upload must be an .xlsx or .csv file.'));
+    } else if (!ALLOWED_EXT.includes(ext)) {
+      return cb(new UserError(`"${file.originalname}" is not an allowed file type.`));
+    }
+    cb(null, true);
+  },
+}).fields([
+  { name: 'amounts_file', maxCount: 1 },
+  { name: 'justification_files', maxCount: MAX_FILES },
+]);
+
 // Parses the multipart form, then verifies the CSRF token.
-function handleUpload(req, res, next) {
-  uploader(req, res, (err) => {
+const handleUpload = (req, res, next) => parseUpload(uploader, req, res, next);
+const handleAmountsUpload = (req, res, next) => parseUpload(amountsUploader, req, res, next);
+
+function parseUpload(mw, req, res, next) {
+  mw(req, res, (err) => {
     if (err) {
       const msg =
         err instanceof UserError
@@ -135,7 +185,8 @@ function handleUpload(req, res, next) {
     if (!csrfOk(req)) {
       return res.status(403).send('Invalid or expired form. Go back, refresh the page, and try again.');
     }
-    const total = (req.files || []).reduce((n, f) => n + f.size, 0);
+    const everyFile = Array.isArray(req.files) ? req.files : [].concat(...Object.values(req.files || {}));
+    const total = everyFile.reduce((n, f) => n + f.size, 0);
     if (total > MAX_TOTAL_BYTES) {
       flash(req, 'error', 'Attachments must total 4 MB or less.');
       return res.redirect(req.get('Referer') || '/request');
@@ -147,7 +198,11 @@ function handleUpload(req, res, next) {
 // The file bytes ride along in `data`; workflow.saveAttachments stores them inside the same
 // transaction as the request, so a failed submission leaves nothing behind.
 function uploadedRecords(req) {
-  return (req.files || []).map((f) => ({
+  return recordsOf(req.files || []);
+}
+
+function recordsOf(files) {
+  return files.map((f) => ({
     original_name: path.basename(f.originalname),
     stored_name: crypto.randomBytes(16).toString('hex'),
     mime: f.mimetype,
@@ -157,9 +212,9 @@ function uploadedRecords(req) {
   }));
 }
 
-// The request form needs the rep list for the monthly MBO picker.
+// The Monthly MBO form needs the rep list for its picker.
 async function formOptions(o) {
-  return { ...o, reps: o.type === 'bonus' ? await wf.getReps() : undefined };
+  return { ...o, reps: o.type === 'mbo' ? await wf.getReps() : undefined };
 }
 
 // Which of the existing attachments the submitter chose to keep (the form's checked boxes).
@@ -173,7 +228,8 @@ function keptRows(req, existing) {
 function ctx(req) {
   const flash = req.session.flash || null;
   if (flash) req.session.flash = null;
-  return { user: req.user, csrf: req.session.csrf, flash };
+  // viewAs: set while an admin is viewing the app as someone else (the banner and the nav use it).
+  return { user: req.user, csrf: req.session.csrf, flash, viewAs: req.viewingAs ? { realName: req.realUser.name } : null };
 }
 
 function flash(req, type, msg) {
@@ -197,6 +253,26 @@ function handleError(e, req, res) {
   console.error(e);
   res.status(500).send('Something went wrong. The error was logged.');
 }
+
+// The scheduled Slack reminders (Vercel Cron calls this daily with `Authorization: Bearer $CRON_SECRET`).
+// ?dry=1 lists who would be messaged without sending; ?force=first|third and ?today=YYYY-MM-DD are for testing.
+app.get(
+  '/cron/reminders',
+  wrap(async (req, res) => {
+    const want = `Bearer ${process.env.CRON_SECRET || ''}`;
+    const sent = String(req.get('Authorization') || '');
+    if (!process.env.CRON_SECRET || sent.length !== want.length || !crypto.timingSafeEqual(Buffer.from(sent), Buffer.from(want))) {
+      return res.status(401).send('Unauthorized.');
+    }
+    res.json(
+      await runReminders(req, {
+        force: ['first', 'third'].includes(req.query.force) ? req.query.force : undefined,
+        today: /^\d{4}-\d{2}-\d{2}$/.test(req.query.today || '') ? req.query.today : undefined,
+        dry: req.query.dry === '1',
+      })
+    );
+  })
+);
 
 const requireAuth = (req, res, next) => (req.user ? next() : res.redirect('/login'));
 const requireRole = (...roles) => (req, res, next) =>
@@ -305,6 +381,31 @@ app.post('/logout', (req, res) => {
 
 app.use(requireAuth);
 
+// ---------------------------------------------------------------- view as (admin only)
+
+app.post(
+  '/view-as',
+  wrap(async (req, res) => {
+    if (req.realUser.role !== 'admin') return res.status(403).send('Not allowed.');
+    const target = await db.prepare('SELECT * FROM users WHERE id = ? AND active = 1').get(Number(req.body.user_id));
+    if (!target || target.id === req.realUser.id) throw new UserError('Choose another active user to view as.');
+    req.session.viewAs = target.id;
+    await audit(req.realUser, 'admin.view_as_started', 'user', target.id, null, { viewed_user: target.name, role: target.role, tier: target.tier });
+    res.redirect('/');
+  })
+);
+
+app.post(
+  '/view-as/stop',
+  wrap(async (req, res) => {
+    if (req.session.viewAs && req.realUser.role === 'admin') {
+      await audit(req.realUser, 'admin.view_as_stopped', 'user', req.session.viewAs, null, null);
+    }
+    req.session.viewAs = null;
+    res.redirect('/admin');
+  })
+);
+
 // ---------------------------------------------------------------- home & account
 
 app.get(
@@ -336,7 +437,7 @@ app.post(
 
 app.get('/request', (req, res) => res.send(views.requestChooser(ctx(req))));
 
-const NEW_TYPES = ['new_spif', 'recurring_spif', 'bonus', 'adjustment'];
+const NEW_TYPES = ['new_spif', 'recurring_spif', 'bonus', 'mbo', 'adjustment'];
 
 app.get(
   '/requests/new',
@@ -423,7 +524,8 @@ app.post(
       flash(req, 'success', 'Monthly MBO recorded. It does not need approval.');
       return res.redirect('/requests/' + mboId);
     }
-    const id = await wf.createRequest(req.user, type, data, saved ? saved.standing : null, uploaded, kept);
+    // This form is "Resubmit with changes" for a recurring SPIF, so it always goes through full review.
+    const id = await wf.createRequest(req.user, type, data, saved ? saved.standing : null, uploaded, kept, true);
     await notifyRequest(req, id);
     flash(req, 'success', 'Request submitted.');
     res.redirect('/requests/' + id);
@@ -434,7 +536,14 @@ app.get(
   '/requests',
   wrap(async (req, res) => {
     const rows = await wf.listRequests(req.user);
-    res.send(views.requestList(ctx(req), rows, wf.queueFor(req.user, rows), await wf.repAmountTotals()));
+    const submitters = [...new Map(rows.map((r) => [r.submitter_id, r.submitter_name])).entries()].sort((a, b) => a[1].localeCompare(b[1]));
+    res.send(
+      views.requestList(ctx(req), wf.filterRequests(rows, req.query), wf.queueFor(req.user, rows), await wf.repAmountTotals(), {
+        query: req.query,
+        submitters,
+        totalCount: rows.length,
+      })
+    );
   })
 );
 
@@ -466,6 +575,7 @@ app.get(
         repAmounts: await wf.getRepAmounts(r.id),
         reps: await wf.getReps(),
         canEditRepAmounts: await wf.canEditRepAmounts(req.user, r),
+        justification: await wf.justificationFiles(r.id),
       })
     );
   })
@@ -570,14 +680,39 @@ const actionRoute = (name, fn, okMsg, after) =>
     })
   );
 
-actionRoute('finance', wf.financeDecide, 'Finance decision recorded.', notifyRequest);
-actionRoute('approver', wf.approverDecide, 'Approver decision recorded.', notifyRequest);
-actionRoute('skip', wf.adminSkip, 'Step skipped and logged.', notifyRequest);
+// The acting user goes to the notifier so Slack messages say when an admin acted on someone's behalf.
+const notifyActor = (req, id) => notifyRequest(req, id, req.user);
+actionRoute('finance', wf.financeDecide, 'Finance decision recorded.', notifyActor);
+actionRoute('approver', wf.approverDecide, 'Approver decision recorded.', notifyActor);
+actionRoute('skip', wf.adminSkip, 'Step skipped and logged.', notifyActor);
 actionRoute('cancel', wf.cancelRequest, 'Request cancelled.');
 actionRoute('results', wf.submitResults, 'Results submitted. The request is finalized.');
-actionRoute('rep-amounts', wf.saveRepAmounts, 'Rep amounts saved.', async (req, id, changed) => {
-  if (changed) await notifyRepAmounts(req, id, req.user);
-});
+
+// Rep amounts: typed in the table, or loaded from a spreadsheet (which replaces the table). A
+// submitter who calculates their own amounts must attach proof of the calculations.
+app.post(
+  '/requests/:id/rep-amounts',
+  handleAmountsUpload,
+  wrap(async (req, res) => {
+    const r = await loadVisible(req, res);
+    if (!r) return;
+    const files = req.files || {};
+    let input = req.body;
+    const sheet = (files.amounts_file || [])[0];
+    if (sheet) {
+      try {
+        const p = await parseAmountsFile(sheet);
+        input = { ...req.body, rep_name: p.names, rep_amount: p.amounts, rep_note: p.notes };
+      } catch (e) {
+        throw new UserError(e.message);
+      }
+    }
+    const changed = await wf.saveRepAmounts(req.user, r.id, input, recordsOf(files.justification_files || []));
+    if (changed) await notifyRepAmounts(req, r.id, req.user);
+    flash(req, 'success', sheet ? `Rep amounts loaded from ${path.basename(sheet.originalname)} and saved.` : 'Rep amounts saved.');
+    res.redirect('/requests/' + r.id);
+  })
+);
 
 // ---------------------------------------------------------------- saved recurring SPIFs
 
@@ -609,7 +744,7 @@ app.post(
       req,
       'success',
       row.status === 'approved'
-        ? `Resubmitted. Terms are unchanged and covered by the approval through ${wf.halfYearLabel(row.approval_through)}, so review was skipped.`
+        ? `Resubmitted. Terms are unchanged and covered by the approval through ${wf.dateLabel(row.approval_through)}, so review was skipped.`
         : 'Resubmitted. It goes through approval again.'
     );
     res.redirect('/requests/' + id);
@@ -621,7 +756,7 @@ app.post(
   requireRole('admin'),
   wrap(async (req, res) => {
     const s = await wf.recurringSource(req.user, req.params.id);
-    if (!s.standing) throw new UserError('This SPIF has no half-year approval to revoke.');
+    if (!s.standing) throw new UserError('This SPIF has no quarterly approval to revoke.');
     await db.prepare('UPDATE saved_spifs SET approved_indefinitely = 0, approved_through = NULL, active = 0 WHERE id = ?').run(
       s.standing.id
     );
@@ -629,7 +764,7 @@ app.post(
       name: s.name,
       through: s.standing.approved_through,
     });
-    flash(req, 'success', `${s.name} was deactivated and its half-year approval revoked.`);
+    flash(req, 'success', `${s.name} was deactivated and its quarterly approval revoked.`);
     res.redirect('/saved');
   })
 );
@@ -639,7 +774,10 @@ app.post(
 app.get(
   '/reports',
   wrap(async (req, res) => {
-    if (req.user.role !== 'admin') return res.send(views.reportsComingSoon(ctx(req)));
+    // Tier 2 and Tier 3 have no Reports. Everyone who does still sees "Coming soon"; only an admin
+    // also gets a preview of the unfinished tables.
+    if (!wf.canSeeReports(req.user)) return res.status(403).send('Not allowed.');
+    if (req.user.role !== 'admin') return res.send(views.reports(ctx(req), null));
     const nowYear = Number(wf.todayIn(req.user.timezone).slice(0, 4));
     const minRow = await db.prepare('SELECT MIN(substr(created_at, 1, 4)) AS y FROM requests').get();
     const minYear = Math.min(minRow && minRow.y ? Number(minRow.y) : nowYear, nowYear);
@@ -647,7 +785,7 @@ app.get(
     for (let y = minYear; y <= nowYear + 1; y++) years.push(y);
     let year = parseInt(req.query.year, 10);
     if (!years.includes(year)) year = nowYear;
-    res.send(views.reports(ctx(req), await wf.reportData(req.user, year), year, years));
+    res.send(views.reports(ctx(req), { data: await wf.reportData(req.user, year), year, years }));
   })
 );
 
@@ -718,6 +856,7 @@ app.get(
       'Source version',
       'Created at',
       ...wf.TERM_FIELDS,
+      'supporting_link',
     ];
     const lines = [header.map(csvCell).join(',')];
     for (const s of rows) {
@@ -738,7 +877,7 @@ app.get(
           s.source_request_id,
           s.source_version,
           s.created_at,
-          ...wf.TERM_FIELDS.map((k) => (Array.isArray(terms[k]) ? terms[k].join('; ') : terms[k])),
+          ...[...wf.TERM_FIELDS, 'supporting_link'].map((k) => (Array.isArray(terms[k]) ? terms[k].join('; ') : terms[k])),
         ]
           .map(csvCell)
           .join(',')

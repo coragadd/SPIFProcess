@@ -10,6 +10,12 @@ const TYPES = {
   bonus: 'Bonus',
   adjustment: 'Adjustment',
 };
+// The Monthly MBO has its own form but is stored as a bonus with bonus_kind = 'mbo' (the requests
+// table only allows the four types above). Form titles and list labels come from here.
+const FORM_TYPES = { ...TYPES, mbo: 'Monthly MBO' };
+function typeLabel(type, data) {
+  return data && data.bonus_kind === 'mbo' ? 'Monthly MBO' : TYPES[type] || type;
+}
 
 const STATUS_LABELS = {
   finance_review: 'Awaiting finance',
@@ -38,7 +44,8 @@ const TIMEZONES = [
   'UTC',
 ];
 
-// Fields that define "how it works". Changing any of these voids a half-year approval.
+// Fields that define "how it works". Changing any of these voids a quarterly approval.
+// 'adjustment_size' is no longer on the form but stays listed so the terms hash of every saved SPIF is unchanged.
 // 'amounts' is still used by adjustments and by requests submitted before payout types existed.
 const TERM_FIELDS = [
   'participants',
@@ -95,6 +102,8 @@ const DATE_FIELDS =['start_date', 'end_date', 'announce_date', 'announce_method'
 function termsOf(data) {
   const o = {};
   for (const k of TERM_FIELDS) o[k] = data[k] == null ? '' : data[k];
+  // The supporting link joined the terms later; it is left out when empty so older hashes still match.
+  if (data.supporting_link) o.supporting_link = data.supporting_link;
   return o;
 }
 
@@ -107,16 +116,18 @@ function hashTerms(data, files) {
     .digest('hex');
 }
 
-async function attachmentsFor(requestId, version) {
+// field: 'eligibility' is the supporting document on the request form (part of the terms);
+// 'payout_justification' is the proof for submitter-calculated amounts (not part of the terms).
+async function attachmentsFor(requestId, version, field = 'eligibility') {
   if (requestId == null || version == null) return [];
   return db
-    .prepare('SELECT * FROM attachments WHERE request_id = ? AND version = ? ORDER BY id')
-    .all(requestId, version);
+    .prepare('SELECT * FROM attachments WHERE request_id = ? AND version = ? AND field = ? ORDER BY id')
+    .all(requestId, version, field);
 }
 
 // Copy carried-over files and record newly uploaded ones against a request version. An uploaded
 // record carries the file's bytes in `data`; carried-over rows share the blob they already have.
-async function saveAttachments(user, requestId, version, carried, uploaded) {
+async function saveAttachments(user, requestId, version, carried, uploaded, field = 'eligibility') {
   const ins = db.prepare(
     `INSERT INTO attachments (request_id, version, field, original_name, stored_name, mime, size, sha256, uploaded_by)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
@@ -126,9 +137,10 @@ async function saveAttachments(user, requestId, version, carried, uploaded) {
   }
   for (const f of uploaded) {
     await db.prepare('INSERT INTO attachment_blobs (stored_name, data) VALUES (?, ?)').run(f.stored_name, f.data);
-    await ins.run(requestId, version, 'eligibility', f.original_name, f.stored_name, f.mime, f.size, f.sha256, user.id);
+    await ins.run(requestId, version, field, f.original_name, f.stored_name, f.mime, f.size, f.sha256, user.id);
     await audit(user, 'attachment.added', 'request', requestId, requestId, {
       version,
+      field,
       file: f.original_name,
       sha256: f.sha256,
       size: f.size,
@@ -166,6 +178,41 @@ function halfYearEnd(today) {
 
 function halfYearLabel(date) {
   return date.endsWith('-06-30') ? 'June 30' : 'December 31';
+}
+
+const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+
+// 'YYYY-MM-DD' -> 'March 31'
+function dateLabel(date) {
+  return `${MONTH_NAMES[Number(date.slice(5, 7)) - 1]} ${Number(date.slice(8, 10))}`;
+}
+
+// The longest approval window is the rest of the current calendar quarter.
+function quarterEnd(today) {
+  const y = Number(today.slice(0, 4));
+  const m = Math.ceil(Number(today.slice(5, 7)) / 3) * 3;
+  const last = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  return `${y}-${String(m).padStart(2, '0')}-${String(last).padStart(2, '0')}`;
+}
+
+// Standing approvals made before quarterly windows existed may run to June 30 or December 31.
+// Nothing is honored past the end of the quarter it was approved in.
+function standingThrough(s) {
+  if (!s || !s.approved_through) return null;
+  const cap = s.approved_at ? quarterEnd(String(s.approved_at).slice(0, 10)) : s.approved_through;
+  return s.approved_through < cap ? s.approved_through : cap;
+}
+
+// The current month is blocked for new runs: the earliest start is the 1st of next month.
+function firstOfNextMonth(today) {
+  const y = Number(today.slice(0, 4));
+  const m = Number(today.slice(5, 7));
+  return m === 12 ? `${y + 1}-01-01` : `${y}-${String(m + 1).padStart(2, '0')}-01`;
+}
+
+// Reports are for admins, finance (classifiers and viewers) and Tier 1. Tier 2 and 3 do not get them.
+function canSeeReports(user) {
+  return user.role === 'admin' || user.role === 'finance' || (user.role === 'submitter' && user.tier === 1);
 }
 
 // Admins can approve any request but their own. Otherwise tiers 1 and 2 can approve, and a user can
@@ -235,12 +282,10 @@ async function validate(type, input, user, opts) {
 
   const isAdj = type === 'adjustment';
 
-  // Bonuses are either regular (full review) or the monthly MBO (no review, its own short form).
-  // A recurring resubmission of a regular bonus carries bonus_kind over from the saved terms.
-  const kind = type === 'bonus' || type === 'recurring_spif' ? s('bonus_kind') : '';
-  if (type === 'bonus' && kind === 'mbo') return await validateMbo(input, user);
-  d.bonus_kind = kind === 'regular' ? 'regular' : '';
-  if (type === 'bonus' && !d.bonus_kind) errors.bonus_kind = 'Choose regular bonus or monthly MBO.';
+  // The monthly MBO is its own request type with a short form and no review. A bonus is always a
+  // regular bonus (full review). A recurring resubmission of a bonus carries bonus_kind over.
+  if (type === 'mbo') return await validateMbo(input, user);
+  d.bonus_kind = type === 'bonus' || (type === 'recurring_spif' && s('bonus_kind') === 'regular') ? 'regular' : '';
   const regularBonus = d.bonus_kind === 'regular';
   for (const k of ['mbo_rep', 'mbo_amount', 'mbo_month']) d[k] = '';
   d.commission_plan = '';
@@ -292,8 +337,8 @@ async function validate(type, input, user, opts) {
     // Adjustments may relate to a deal, a component, or nothing at all.
     d.deal = s('deal');
     need('adjustment_reason', 'Reason for the adjustment', 20);
-    d.adjustment_size = s('adjustment_size');
-    if (!['full', 'half'].includes(d.adjustment_size)) errors.adjustment_size = 'Choose full or half.';
+    d.adjustment_size = '';
+    d.supporting_link = '';
     d.payout_structure = '';
     d.eligibility = '';
     d.edge_cases = '';
@@ -341,6 +386,12 @@ async function validate(type, input, user, opts) {
 
   // Required, and typed in the form: an attached document does not replace it.
   need('eligibility', 'Eligibility and measurement rules');
+  // A shareable link to the supporting document (SharePoint). Optional, but it must be a real link.
+  d.supporting_link = s('supporting_link');
+  if (d.supporting_link && !/^https?:\/\/[^\s]+$/i.test(d.supporting_link)) {
+    errors.supporting_link = 'Enter the full link, starting with https://.';
+  }
+  d.adjustment_size = '';
   // Edge cases are optional.
   d.edge_cases = s('edge_cases');
 
@@ -359,7 +410,9 @@ async function validate(type, input, user, opts) {
   if (!d.announce_method) errors.announce_method = 'Announcement method is required.';
 
   if (!validDate(d.start_date)) errors.start_date = 'Enter a start date.';
-  else if (d.start_date <= today) errors.start_date = `Start date must be after today (${today}, your time zone).`;
+  else if (d.start_date < firstOfNextMonth(today)) {
+    errors.start_date = `The current month is blocked. The earliest start date is ${firstOfNextMonth(today)}, the 1st of next month (your time zone).`;
+  }
 
   if (!validDate(d.end_date)) errors.end_date = 'An end date is required. No perpetual SPIFs.';
   else if (validDate(d.start_date) && d.end_date < d.start_date) errors.end_date = 'End date cannot be before the start date.';
@@ -455,7 +508,9 @@ function availableActions(user, r, data) {
     finance: r.status === 'finance_review' && canClassify(user) && !self,
     approver: r.status === 'approver_review' && canApprove(user, r),
     skip: pending && user.role === 'admin' && !self,
-    halfYearEnd: halfYearEnd(today),
+    quarterEnd: quarterEnd(today),
+    // True when an admin is acting in someone else's place; the record then says so.
+    asAdmin: user.role === 'admin',
     cancel: (pending || r.status === 'returned') && (self || user.role === 'admin'),
     edit: r.status === 'returned' && self,
     results:
@@ -502,6 +557,27 @@ async function getReps() {
   return out;
 }
 
+async function hasJustification(requestId) {
+  const row = await db.prepare("SELECT COUNT(*) AS n FROM attachments WHERE request_id = ? AND field = 'payout_justification'").get(requestId);
+  return row.n > 0;
+}
+
+function justificationFiles(requestId) {
+  return db.prepare("SELECT * FROM attachments WHERE request_id = ? AND field = 'payout_justification' ORDER BY id").all(requestId);
+}
+
+// The All Requests filters: submitted date range, status and submitter.
+function filterRequests(rows, q) {
+  const from = /^\d{4}-\d{2}-\d{2}$/.test(q.from || '') ? q.from : '';
+  const to = /^\d{4}-\d{2}-\d{2}$/.test(q.to || '') ? q.to : '';
+  const status = String(q.status || '');
+  const submitter = Number(q.submitter) || 0;
+  return rows.filter((r) => {
+    const day = String(r.created_at).slice(0, 10);
+    return (!from || day >= from) && (!to || day <= to) && (!status || r.status === status) && (!submitter || r.submitter_id === submitter);
+  });
+}
+
 function getRepAmounts(requestId) {
   return db.prepare('SELECT * FROM rep_amounts WHERE request_id = ? ORDER BY id').all(requestId);
 }
@@ -514,9 +590,16 @@ async function repAmountTotals() {
   return out;
 }
 
-const saveRepAmounts = db.transaction(async (user, requestId, input) => {
+const JUSTIFICATION_MSG =
+  'Attach a screenshot or file showing how you calculated these amounts before saving them. ' +
+  'Because you are calculating the payouts yourself, Rev Ops and finance need that proof to verify them. Nothing was saved.';
+
+// justification: newly uploaded file records (proof of the submitter's calculations). A submitter
+// who calculates their own amounts must have at least one on the request; admins are exempt.
+const saveRepAmounts = db.transaction(async (user, requestId, input, justification) => {
   const r = await getRequest(requestId);
   if (!r || !(await canEditRepAmounts(user, r))) throw new UserError('You cannot change the rep amounts on this request.');
+  const proof = justification || [];
   const names = [].concat(input.rep_name || []).map((v) => String(v).trim());
   const amounts = [].concat(input.rep_amount || []).map((v) => String(v).trim());
   const notes = [].concat(input.rep_note || []).map((v) => String(v).trim());
@@ -542,7 +625,12 @@ const saveRepAmounts = db.transaction(async (user, requestId, input) => {
   }
   const before = saved.map((x) => ({ rep: x.rep_name, amount: x.amount, note: x.note }));
   const after = rows.map((x) => ({ rep: x.rep_name, amount: x.amount, note: x.note }));
-  if (JSON.stringify(before) === JSON.stringify(after)) return false;
+  const changed = JSON.stringify(before) !== JSON.stringify(after);
+  if (changed && rows.length && user.role !== 'admin' && !proof.length && !(await hasJustification(requestId))) {
+    throw new UserError(JUSTIFICATION_MSG);
+  }
+  if (proof.length) await saveAttachments(user, requestId, r.current_version, [], proof, 'payout_justification');
+  if (!changed) return proof.length > 0;
   await db.prepare('DELETE FROM rep_amounts WHERE request_id = ?').run(requestId);
   const ins = db.prepare('INSERT INTO rep_amounts (request_id, rep_name, amount, note, updated_by) VALUES (?, ?, ?, ?, ?)');
   for (const x of rows) await ins.run(requestId, x.rep_name, x.amount, x.note, user.id);
@@ -561,10 +649,11 @@ function displayStatus(r, data, tz) {
 
 // ---------------------------------------------------------------- writes
 
-async function addStep(requestId, version, step, decision, reasoning, detail, userId) {
+// byAdmin: the decision was made by an admin (shown as "(admin)" next to the name).
+async function addStep(requestId, version, step, decision, reasoning, detail, userId, byAdmin) {
   await db.prepare(
-    'INSERT INTO approval_steps (request_id, version, step, decision, reasoning, detail, decided_by) VALUES (?, ?, ?, ?, ?, ?, ?)'
-  ).run(requestId, version, step, decision, reasoning || null, detail || null, userId == null ? null : userId);
+    'INSERT INTO approval_steps (request_id, version, step, decision, reasoning, detail, decided_by, by_admin) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+  ).run(requestId, version, step, decision, reasoning || null, detail || null, userId == null ? null : userId, byAdmin ? 1 : 0);
 }
 
 async function setStatus(id, status, extra) {
@@ -577,17 +666,17 @@ async function setStatus(id, status, extra) {
   ).run(status, e.classification || null, e.reasoning || null, e.scope || null, e.through || null, id);
 }
 
-// What a user's approve action means: this month only, or through the end of the half year.
-function approvalScopeFor(user, r, wantsHalfYear) {
-  if (!wantsHalfYear) return { scope: 'once', through: null };
+// What a user's approve action means: this month only, or through the end of the current quarter.
+function approvalScopeFor(user, r, wantsQuarter) {
+  if (!wantsQuarter) return { scope: 'once', through: null };
   if (r.type === 'adjustment') throw new UserError('Adjustments can only be approved once.');
-  return { scope: 'half_year', through: halfYearEnd(todayIn(user.timezone || 'America/New_York')) };
+  return { scope: 'quarter', through: quarterEnd(todayIn(user.timezone || 'America/New_York')) };
 }
 
-// A half-year approval is remembered as a standing approval for this SPIF's name and terms.
+// A quarterly approval is remembered as a standing approval for this SPIF's name and terms.
 async function recordStandingApproval(id, actor) {
   const r = await getRequest(id);
-  if (r.status !== 'approved' || r.approval_scope !== 'half_year') return;
+  if (r.status !== 'approved' || r.approval_scope !== 'quarter') return;
   const data = await currentData(r);
   const terms = JSON.stringify(termsOf(data));
   const hash = hashTerms(data, await attachmentsFor(r.id, r.current_version));
@@ -621,7 +710,7 @@ async function recordStandingApproval(id, actor) {
     saved = { id: info.lastInsertRowid };
   }
   await db.prepare('UPDATE requests SET saved_spif_id = ? WHERE id = ?').run(saved.id, id);
-  await audit(actor, 'saved_spif.approved_half_year', 'saved_spif', saved.id, id, { name: r.name, through: r.approval_through });
+  await audit(actor, 'saved_spif.approved_quarter', 'saved_spif', saved.id, id, { name: r.name, through: r.approval_through });
 }
 
 function standingFor(name) {
@@ -656,7 +745,9 @@ async function recurringSources(user) {
     if (JSON.parse(r.data_json).bonus_kind === 'mbo') continue;
     const standing = await standingFor(r.name);
     if (standing && !standing.active) continue;
-    out.push({ ...r, data: JSON.parse(r.data_json), standing: standing && standing.approved_through ? standing : null });
+    // The standing approval is capped to the end of the quarter it was given in.
+    const through = standingThrough(standing);
+    out.push({ ...r, data: JSON.parse(r.data_json), standing: through ? { ...standing, approved_through: through } : null });
   }
   return out.sort((a, b) => a.name.localeCompare(b.name));
 }
@@ -671,7 +762,9 @@ async function recurringSource(user, requestId) {
 }
 
 // carried: attachment rows copied from a saved SPIF; uploaded: newly uploaded file records.
-const createRequest = db.transaction(async (user, type, data, saved, uploaded, carried) => {
+// noSkip: always send it through review, even when the terms match a standing approval (used by
+// "Resubmit with changes", where the submitter edited the request).
+const createRequest = db.transaction(async (user, type, data, saved, uploaded, carried, noSkip) => {
   if (!TYPES[type]) throw new UserError('Unknown request type.');
   const up = uploaded || [];
   const carry = carried || [];
@@ -690,10 +783,11 @@ const createRequest = db.transaction(async (user, type, data, saved, uploaded, c
   await saveAttachments(user, id, 1, carry, up);
   await audit(user, 'request.submitted', 'request', id, id, { type, name: data.name, version: 1 });
 
-  // Terms unchanged from a half-year approval that still covers the whole run: finance and approver
+  // Terms unchanged from a quarterly approval that still covers the whole run: finance and approver
   // steps are covered. Everything else (a one-month approval, changed terms, a run past the
-  // approval's end date) goes through full review again.
+  // approval's end date, or any edit made through "Resubmit with changes") goes through full review again.
   if (
+    !noSkip &&
     type === 'recurring_spif' &&
     saved &&
     saved.active &&
@@ -703,11 +797,11 @@ const createRequest = db.transaction(async (user, type, data, saved, uploaded, c
   ) {
     const note = `Terms unchanged from saved SPIF #${saved.id}, approved through ${saved.approved_through}`;
     await addStep(id, 1, 'finance', 'skipped', note, 'inherited classification: ' + (saved.classification || 'none'), null);
-    await addStep(id, 1, 'approver', 'skipped', note, 'half-year approval', null);
+    await addStep(id, 1, 'approver', 'skipped', note, 'quarterly approval', null);
     await setStatus(id, 'approved', {
       classification: saved.classification,
       reasoning: saved.classification_reasoning,
-      scope: 'half_year',
+      scope: 'quarter',
       through: saved.approved_through,
     });
     await audit(null, 'request.auto_approved_steps', 'request', id, id, { savedSpifId: saved.id, status: 'approved' });
@@ -782,8 +876,9 @@ const financeDecide = db.transaction(async (user, id, input) => {
     const next = afterFinance(r.submitter_tier);
     // Tier 1 requests end here, so finance also picks the scope; otherwise the approver does.
     const { scope, through } =
-      next === 'approved' ? approvalScopeFor(user, r, input.scope === 'half_year') : { scope: null, through: null };
-    await addStep(id, r.current_version, 'finance', 'approved', reasoning, input.classification, user.id);
+      next === 'approved' ? approvalScopeFor(user, r, input.scope === 'quarter') : { scope: null, through: null };
+    const byAdmin = user.role === 'admin';
+    await addStep(id, r.current_version, 'finance', 'approved', reasoning, input.classification, user.id, byAdmin);
     await setStatus(id, next, { classification: input.classification, reasoning, scope, through });
     if (concern) await db.prepare('UPDATE requests SET finance_concern = ? WHERE id = ?').run(concern, id);
     await audit(user, 'finance.classified', 'request', id, id, {
@@ -793,6 +888,7 @@ const financeDecide = db.transaction(async (user, id, input) => {
       scope,
       through,
       next,
+      as_admin: byAdmin,
     });
     await recordStandingApproval(id, user);
   } else {
@@ -813,18 +909,19 @@ const approverDecide = db.transaction(async (user, id, input) => {
   // One approver is enough: whoever acts first completes the step. If some SPIFs later need both
   // approvers, count the 'approved' rows in approval_steps for this version here instead of
   // approving on the first one.
-  if (action === 'approve_once' || action === 'approve_half_year') {
-    const { scope, through } = approvalScopeFor(user, r, action === 'approve_half_year');
-    await addStep(id, r.current_version, 'approver', 'approved', reasoning, through ? `${scope} through ${through}` : scope, user.id);
+  const byAdmin = user.role === 'admin';
+  if (action === 'approve_once' || action === 'approve_quarter') {
+    const { scope, through } = approvalScopeFor(user, r, action === 'approve_quarter');
+    await addStep(id, r.current_version, 'approver', 'approved', reasoning, through ? `${scope} through ${through}` : scope, user.id, byAdmin);
     await setStatus(id, 'approved', { scope, through });
-    await audit(user, 'approver.approved', 'request', id, id, { scope, through, reasoning });
+    await audit(user, 'approver.approved', 'request', id, id, { scope, through, reasoning, as_admin: byAdmin });
     await recordStandingApproval(id, user);
   } else if (action === 'return' || action === 'reject') {
     if (reasoning.length < 10) throw new UserError('A reason is required (at least 10 characters).');
     const decision = action === 'return' ? 'returned' : 'rejected';
-    await addStep(id, r.current_version, 'approver', decision, reasoning, null, user.id);
+    await addStep(id, r.current_version, 'approver', decision, reasoning, null, user.id, byAdmin);
     await setStatus(id, action === 'return' ? 'returned' : 'rejected');
-    await audit(user, 'approver.' + decision, 'request', id, id, { reasoning });
+    await audit(user, 'approver.' + decision, 'request', id, id, { reasoning, as_admin: byAdmin });
   } else {
     throw new UserError('Unknown action.');
   }
@@ -843,9 +940,9 @@ const adminSkip = db.transaction(async (user, id, input) => {
   const stepName = { finance_review: 'finance', approver_review: 'approver', second_signoff: 'second_signoff' }[r.status];
   // Skipping finance moves a request on to its approver (tier 1 has none); skipping the approver completes it.
   const next = r.status === 'finance_review' ? afterFinance(r.submitter_tier) : 'approved';
-  await addStep(id, r.current_version, stepName, 'skipped', reasoning, 'admin override', user.id);
+  await addStep(id, r.current_version, stepName, 'skipped', reasoning, 'admin override', user.id, true);
   await setStatus(id, next);
-  await audit(user, 'admin.skipped_step', 'request', id, id, { step: stepName, reasoning, next });
+  await audit(user, 'admin.skipped_step', 'request', id, id, { step: stepName, reasoning, next, as_admin: true });
 });
 
 const cancelRequest = db.transaction(async (user, id, input) => {
@@ -949,6 +1046,16 @@ async function reportData(user, year) {
 module.exports = {
   UserError,
   TYPES,
+  FORM_TYPES,
+  typeLabel,
+  quarterEnd,
+  dateLabel,
+  standingThrough,
+  firstOfNextMonth,
+  canSeeReports,
+  hasJustification,
+  justificationFiles,
+  filterRequests,
   STATUS_LABELS,
   PENDING,
   TIMEZONES,

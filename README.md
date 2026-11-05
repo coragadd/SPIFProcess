@@ -2,7 +2,15 @@
 
 Strict, auditable request and approval process for SPIFs, bonuses, and adjustments.
 
-Flow: submitter requests -> finance classifies (capitalizable or expense; finance can report a concern but cannot return or reject) -> a higher-tier approver approves once (this month) or through the end of the half year (June 30 / December 31), and can also return or reject. One approver is enough. Tier 1 submitters have no approver, so finance's step completes their requests. A half-year approval lets resubmissions with unchanged terms that end by that date skip review. Every action is written to an append-only audit log.
+Flow: submitter requests -> finance classifies (capitalizable or expense; finance can report a concern but cannot return or reject) -> a higher-tier approver approves once (this month) or through the end of the current quarter, and can also return or reject. One approver is enough. Tier 1 submitters have no approver, so finance's step completes their requests. A quarterly approval lets resubmissions with unchanged terms that end by that date skip review ("Resubmit with changes" always goes through review). Every action is written to an append-only audit log.
+
+Admins can do every step (classify, approve, skip) except on their own requests. Their decisions show as "(admin)" on the record and in the audit log, and Slack says an admin acted. Admins also have a read-only "View as" mode (Admin page) to see the app as another user. Reports are visible to admins, finance and Tier 1 only, and are marked "Coming soon".
+
+Payout amounts (Manage Incentives): amounts can be typed or loaded from an .xlsx/.csv (columns Rep, Amount, optional Note). When RevOps calculates, only an admin can enter or upload them. When the submitter calculates, they must also attach a screenshot or file showing their calculations.
+
+## Scheduled Slack reminders
+
+`vercel.json` has a Vercel Cron job that calls `/cron/reminders` daily at 14:00 UTC. On the 1st (America/New_York) it DMs submitters who still have no payout amounts for SPIFs that ended last month ("due by the 3rd"); on the 3rd it sends a follow-up for anything still missing. Each reminder is sent at most once a month. Set `CRON_SECRET` in Vercel (the route rejects calls without it). To test: `GET /cron/reminders?dry=1&force=first` with `Authorization: Bearer <CRON_SECRET>` lists who would be messaged without sending (`today=YYYY-MM-DD` overrides the date).
 
 ## Stack
 
@@ -24,6 +32,7 @@ Node + Express, server-rendered pages, hosted on Vercel as a serverless function
 | `ENTRA_TENANT_ID` | optional | Entra directory (tenant) ID; defaults to Quilt's tenant |
 | `ENTRA_REDIRECT_URI` | optional | Defaults to `APP_URL` (or the request host) + `/auth/microsoft/callback`; must match Entra exactly |
 | `BREAK_GLASS_EMAILS` | optional | Comma-separated admins who can still use password sign-in at `/login?admin=1` once SSO is on. Defaults to `ADMIN_EMAIL` |
+| `CRON_SECRET` | for reminders | Long random string. Vercel sends it as `Authorization: Bearer ...` on cron calls; `/cron/reminders` refuses requests without it |
 | `SLACK_BOT_TOKEN` | for Slack | Bot token with `chat:write`; sends to channels and DMs |
 | `SLACK_FINANCE_CHANNEL_ID` | for Slack | Channel for "needs finance action" |
 | `SLACK_COMMISSION_CHANNEL_ID` | for Slack | Channel for "needs the commissions team" |

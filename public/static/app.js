@@ -19,7 +19,7 @@
       // End date: on or after the start date and within the same month.
       var start = form.querySelector('[name=start_date]');
       var end = form.querySelector('[name=end_date]');
-      var bonusKind = form.querySelector('[name=bonus_kind]');
+      var bonusKind = form.getAttribute('data-bonus');
       if (start && end) {
         var syncDates = function () {
           if (start.value) {
@@ -70,17 +70,6 @@
         }
       }
     })(forms[i]);
-  }
-
-  // Bonus: show the regular-bonus fields or the monthly MBO fields, whichever is chosen.
-  var kindSelect = document.querySelector('select[name=bonus_kind]');
-  if (kindSelect) {
-    var kindGroups = document.querySelectorAll('[data-bonus-group]');
-    var syncKind = function () {
-      for (var k = 0; k < kindGroups.length; k++) kindGroups[k].hidden = kindGroups[k].getAttribute('data-bonus-group') !== kindSelect.value;
-    };
-    kindSelect.addEventListener('change', syncKind);
-    syncKind();
   }
 
   // Payout type: show only the fields for the chosen type; tier 3 only when 3 tiers are picked.
@@ -197,6 +186,26 @@
     repForm.addEventListener('submit', function (e) {
       var seen = {};
       var message = '';
+      // A submitter who calculates their own amounts must attach proof of the calculations.
+      var proof = document.getElementById('justification_files');
+      var sheet = document.getElementById('amounts_file');
+      var typedRows = false;
+      var rowSelects = repBody.querySelectorAll('select');
+      for (var t = 0; t < rowSelects.length; t++) if (rowSelects[t].value) typedRows = true;
+      if (
+        proof &&
+        repForm.getAttribute('data-needs-proof') === '1' &&
+        repForm.getAttribute('data-has-proof') !== '1' &&
+        !proof.files.length &&
+        (typedRows || (sheet && sheet.files.length))
+      ) {
+        e.preventDefault();
+        repError.textContent =
+          'Attach a screenshot or file showing how you calculated these amounts before saving. Because you calculate the payouts yourself, Rev Ops and finance need that proof to verify them.';
+        repError.hidden = false;
+        proof.focus();
+        return;
+      }
       var rows = repBody.querySelectorAll('tr');
       for (var n = 0; n < rows.length && !message; n++) {        var rep = rows[n].querySelector('select').value;
         var amount = rows[n].querySelector('[name=rep_amount]').value;

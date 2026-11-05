@@ -1,5 +1,18 @@
 'use strict';
-const { TYPES, STATUS_LABELS, TIMEZONES, GROUPS, PODS, displayStatus, halfYearLabel, todayIn } = require('./workflow');
+const {
+  TYPES,
+  FORM_TYPES,
+  STATUS_LABELS,
+  TIMEZONES,
+  GROUPS,
+  PODS,
+  displayStatus,
+  dateLabel,
+  todayIn,
+  typeLabel,
+  firstOfNextMonth,
+  canSeeReports,
+} = require('./workflow');
 
 const esc = (s) =>
   String(s == null ? '' : s)
@@ -40,7 +53,17 @@ const PAYOUT_TYPES = [
   ['calculated', 'Calculated payout'],
 ];
 const PAYOUT_LABELS = { ...Object.fromEntries(PAYOUT_TYPES), flat_rate: 'Flat rate' };
-const CALCULATOR_LABELS = { commissions: 'Rev Ops', submitter: 'Submitter' };
+const CALCULATOR_LABELS = { commissions: 'RevOps', submitter: 'Submitter' };
+
+// The Quilt mark: three stacked diamonds (sky on top, plum below, a small navy one in the middle).
+const LOGO = `<svg class="logo" viewBox="0 0 32 32" width="26" height="26" aria-hidden="true">
+  <polygon points="16,13 25,22 16,31 7,22" fill="var(--plum)"/>
+  <polygon points="16,1 25,10 16,19 7,10" fill="var(--sky)"/>
+  <polygon points="16,9.5 20.5,14 16,18.5 11.5,14" fill="var(--navy)"/>
+</svg>`;
+
+// A small "?" that shows its text on hover or keyboard focus.
+const tipHtml = (text) => `<button type="button" class="tip" data-tip="${esc(text)}" aria-label="${esc(text)}">?</button>`;
 
 const ADJUSTMENT_GUIDE =
   'Adjustment guide: adjustments are treated as expenses by default.';
@@ -53,10 +76,11 @@ function page(ctx, title, body) {
   const u = ctx.user;
   const nav = u
     ? `<nav class="topnav">
+        <a class="brand" href="/">${LOGO}<span>Quilt Software</span></a>
         <a href="/">Home</a>
         <a href="/request">Request</a>
         <a href="/requests">Manage</a>
-        <a href="/reports">Reports</a>
+        ${canSeeReports(u) ? '<a href="/reports">Reports</a>' : ''}
         ${u.role !== 'submitter' || u.tier <= 2 ? '<a href="/audit">Audit log</a>' : ''}
         ${u.role === 'admin' ? '<a href="/admin">Admin</a>' : ''}
         <span class="spacer"></span>
@@ -64,20 +88,28 @@ function page(ctx, title, body) {
         <form method="post" action="/logout" class="inline">${csrfField(ctx)}<button class="link">Sign out</button></form>
       </nav>`
     : '';
+  // Shown on every page while an admin is viewing as someone else. Changes are turned off meanwhile.
+  const viewAs = ctx.viewAs
+    ? `<div class="viewas"><span><strong>Viewing as ${esc(u.name)} (${esc(ROLE_LABELS[roleKey(u)])}${u.role === 'submitter' ? ', tier ' + esc(u.tier) : ''}).</strong>
+        Read-only: you are signed in as ${esc(ctx.viewAs.realName)} (admin), and nothing can be changed in this mode.</span>
+        <form method="post" action="/view-as/stop" class="inline">${csrfField(ctx)}<button class="chip">Exit View as</button></form></div>`
+    : '';
   const flash = ctx.flash ? `<div class="flash ${esc(ctx.flash.type)}">${esc(ctx.flash.msg)}</div>` : '';
   return `<!DOCTYPE html>
 <html lang="en"><head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>${esc(title)} | Sales Incentive Manager</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&display=swap">
 <link rel="stylesheet" href="/static/styles.css">
-</head><body>${nav}<main class="container">${flash}${body}</main><script src="/static/app.js"></script></body></html>`;
+</head><body>${viewAs}${nav}<main class="container">${flash}${body}</main><script src="/static/app.js"></script></body></html>`;
 }
 
 // ------------------------------------------------------------ form helpers
 
-function fieldWrap(name, label, hint, errors, inner) {
+function fieldWrap(name, label, hint, errors, inner, tip) {
   return `<div class="field${errors[name] ? ' has-error' : ''}">
-    <label for="${name}">${esc(label)}</label>
+    <label for="${name}">${esc(label)}${tip ? tipHtml(tip) : ''}</label>
     ${inner}
     ${hint ? `<div class="hint">${esc(hint)}</div>` : ''}
     ${errors[name] ? `<div class="err">${esc(errors[name])}</div>` : ''}
@@ -89,13 +121,13 @@ function input(name, label, values, errors, o) {
   const inner = `<input id="${name}" name="${name}" type="${opt.type || 'text'}" value="${esc(values[name])}"${
     opt.readonly ? ' readonly' : ''
   }${opt.step ? ` step="${opt.step}"` : ''}${opt.min ? ` min="${opt.min}"` : ''}${opt.max ? ` max="${opt.max}"` : ''}>`;
-  return fieldWrap(name, label, opt.hint, errors, inner);
+  return fieldWrap(name, label, opt.hint, errors, inner, opt.tip);
 }
 
 function textarea(name, label, values, errors, o) {
   const opt = o || {};
   const inner = `<textarea id="${name}" name="${name}" rows="${opt.rows || 4}">${esc(values[name])}</textarea>`;
-  return fieldWrap(name, label, opt.hint, errors, inner);
+  return fieldWrap(name, label, opt.hint, errors, inner, opt.tip);
 }
 
 function select(name, label, values, errors, options, o) {
@@ -106,7 +138,15 @@ function select(name, label, values, errors, options, o) {
       .map(([v, l]) => `<option value="${esc(v)}"${String(values[name]) === String(v) ? ' selected' : ''}>${esc(l)}</option>`)
       .join('')}
   </select>`;
-  return fieldWrap(name, label, opt.hint, errors, inner);
+  return fieldWrap(name, label, opt.hint, errors, inner, opt.tip);
+}
+
+// The supporting document: a shareable SharePoint link (what marketing needs) and, optionally, files.
+function supportingDocFields(values, errors, existing, keptIds, reattach) {
+  return `${input('supporting_link', 'Link a supporting document', values, errors, {
+    type: 'url',
+    hint: 'Use a shareable SharePoint link (anyone at Quilt can view). Marketing needs access to it, so check the link opens without a request for permission.',
+  })}${fileField(existing, keptIds, reattach)}`;
 }
 
 function fileField(existing, keptIds, reattach) {
@@ -120,7 +160,7 @@ function fileField(existing, keptIds, reattach) {
     )
     .join('<br>');
   return `<div class="field">
-    <label for="eligibility_files">Attach a supporting document (optional)</label>
+    <label for="eligibility_files">Or attach a file (optional)</label>
     ${kept ? `<div class="hint">Already attached. Uncheck to remove.</div><div>${kept}</div>` : ''}
     <input id="eligibility_files" name="eligibility_files" type="file" multiple accept=".pdf,.doc,.docx,.xls,.xlsx,.csv,.txt,.png,.jpg,.jpeg">
     <div class="hint">${
@@ -204,7 +244,7 @@ function home(ctx, pendingCount) {
     <nav class="options">
       <a class="card" href="/request"><h2>Request an Incentive</h2><p>Submit a new SPIF, recurring SPIF, bonus, or adjustment.</p></a>
       <a class="card" href="/requests"><h2>Manage an Incentive</h2><p>Track, review, approve, and report results on requests.</p></a>
-      <a class="card" href="/reports"><h2>View Reports</h2><p>Spend by submitter, SPIF, and month.</p></a>
+      ${canSeeReports(u) ? '<a class="card" href="/reports"><h2>View Reports <span class="pill soon">Coming soon</span></h2><p>Spend by submitter, SPIF, and month.</p></a>' : ''}
     </nav>
     ${u.role === 'admin' ? '<p><a href="/admin">Open the admin portal</a></p>' : ''}`
   );
@@ -220,7 +260,8 @@ function requestChooser(ctx) {
     <nav class="options">
       <a class="card" href="/requests/new?type=new_spif"><h2>New SPIF</h2><p>A SPIF that has not run before.</p></a>
       <a class="card" href="/saved"><h2>Recurring SPIF</h2><p>Pick a saved SPIF and resubmit it with new dates.</p></a>
-      <a class="card" href="/requests/new?type=bonus"><h2>Bonus</h2><p>A regular bonus, or the monthly MBO (no approval needed).</p></a>
+      <a class="card" href="/requests/new?type=bonus"><h2>Bonus</h2><p>A regular bonus. It goes through finance and approval.</p></a>
+      <a class="card" href="/requests/new?type=mbo"><h2>Monthly MBO</h2><p>One rep, one amount, one month. No approval needed.</p></a>
       <a class="card" href="/requests/new?type=adjustment"><h2>Adjustment</h2><p>A commission adjustment, on a deal, a component, or neither.</p></a>
     </nav>`
   );
@@ -229,6 +270,7 @@ function requestChooser(ctx) {
 function requestForm(ctx, o) {
   const { type, values, errors, action, submitLabel, savedId, lockName, requestId, existingFiles, keptIds, reattach } = o;
   const isAdj = type === 'adjustment';
+  const isMbo = type === 'mbo';
   const hidden = `${csrfField(ctx)}<input type="hidden" name="type" value="${esc(type)}">${
     savedId ? `<input type="hidden" name="saved_id" value="${esc(savedId)}">` : ''
   }`;
@@ -239,12 +281,14 @@ function requestForm(ctx, o) {
   const common = `
     ${input('name', 'Name', values, errors, { readonly: lockName, hint: lockName ? 'Saved recurring SPIF name.' : 'Must be distinct from every other request.' })}
     ${participantsFields(values, errors, isAdj ? 'Person or team receiving the adjustment' : 'People or team involved')}
-    ${textarea('description', isAdj ? 'Description' : 'Detailed description of how it works', values, errors, { rows: 6 })}`;
+    ${textarea('description', isAdj ? 'Description' : 'Detailed description of how it works', values, errors, {
+      rows: 6,
+      tip: `Minimum ${isAdj ? 20 : 50} characters. Be specific enough that finance and the approver can understand it without asking you questions.`,
+    })}`;
 
   const adjFields = `
     <div class="flash info">${esc(ADJUSTMENT_GUIDE)}</div>
     ${input('deal', 'Deal or component (optional)', values, errors, { hint: 'Leave blank if the adjustment is not tied to a specific deal or component.' })}
-    ${select('adjustment_size', 'Adjustment size', values, errors, [['full', 'Full'], ['half', 'Half']])}
     ${textarea('adjustment_reason', 'Reason for the adjustment', values, errors)}
     ${input('amounts', 'Payout amount', values, errors, { hint: 'e.g. $450 commission adjustment' })}`;
 
@@ -260,7 +304,7 @@ function requestForm(ctx, o) {
   const spifFields = `
     ${values.amounts ? `<div class="flash info"><strong>Previous payout amounts:</strong> <span class="pre">${esc(values.amounts)}</span><br>Enter them in the payout fields below.</div>` : ''}
     <details class="info">
-      <summary>What do the payout types mean?</summary>
+      <summary>What do the payout structures mean?</summary>
       <ul>
         <li><strong>Flat payout:</strong> one amount per winner. Example: $300.</li>
         <li><strong>Ranked payout:</strong> a competition between reps. Reps are ranked on a result and each paid rank gets its own amount; you choose how many ranks are paid (2 or more). Example: 1st place $500, 2nd place $200.</li>
@@ -285,7 +329,11 @@ function requestForm(ctx, o) {
     })}
     ${input('estimated_spend', 'Estimated total spend ($)', values, errors, { type: 'number', step: '0.01' })}
     <div class="row">
-      ${input('start_date', 'Start date', values, errors, { type: 'date' })}
+      ${input('start_date', 'Start date', values, errors, {
+        type: 'date',
+        min: firstOfNextMonth(todayIn(ctx.user.timezone || 'America/New_York')),
+        tip: 'The current month is blocked. The earliest start date is the 1st of next month.',
+      })}
       ${input('end_date', 'End date', values, errors, { type: 'date', hint: 'Required. Must be in the same month as the start date.' })}
     </div>
     <div class="row">
@@ -293,49 +341,35 @@ function requestForm(ctx, o) {
       ${input('announce_method', 'How it will be announced', values, errors, { hint: 'e.g. email, all-hands, Slack' })}
     </div>
     ${textarea('eligibility', 'Eligibility and measurement rules', values, errors, { hint: 'Required. Who qualifies and exactly how the payout is earned and measured.' })}
-    ${fileField(existingFiles, keptIds, reattach)}
+    ${supportingDocFields(values, errors, existingFiles, keptIds, reattach)}
     ${textarea('edge_cases', 'Edge cases (optional)', values, errors, {
       hint: 'Think of one-off cases that may require exceptions, and say how each would be handled.',
     })}`;
 
-  // Bonuses: choose regular or the monthly MBO. A regular bonus is a normal request plus the
-  // commission plan question; the MBO is a short form that skips approval.
+  // A bonus is a normal request plus the commission plan question. The Monthly MBO is its own short
+  // form that skips approval.
   const regularRecurring = type === 'recurring_spif' && values.bonus_kind === 'regular';
-  const isMbo = type === 'bonus' && values.bonus_kind === 'mbo';
   const commissionPlan =
     type === 'bonus' || regularRecurring
       ? select('commission_plan', 'Does this need to be written into the commission plan?', values, errors, [['yes', 'Yes'], ['no', 'No']])
       : '';
-  const bonusKindFields =
-    type === 'bonus'
-      ? `${select('bonus_kind', 'Bonus type', values, errors, [['regular', 'Regular bonus'], ['mbo', 'Monthly MBO']], {
-          hint: 'A monthly MBO needs no approval. A regular bonus goes through finance and approval.',
-        })}
-      <div data-bonus-group="mbo"${isMbo ? '' : ' hidden'}>
-        <div class="flash info">The monthly MBO is approved when you submit it. Choose the rep, the amount and the month.</div>
-        <div class="field${errors.mbo_rep ? ' has-error' : ''}"><label for="mbo_rep">Rep</label>${repPicker('mbo_rep', o.reps || [], values.mbo_rep, 'mbo_rep')}${errors.mbo_rep ? `<div class="err">${esc(errors.mbo_rep)}</div>` : ''}</div>
-        ${input('mbo_amount', 'Amount ($)', values, errors, { type: 'number', step: '0.01' })}
-        ${input('mbo_month', 'Month', values, errors, { type: 'month' })}
-        ${textarea('mbo_description', 'Description (optional)', values, errors, { rows: 3 })}
-      </div>`
-      : regularRecurring
-      ? '<input type="hidden" name="bonus_kind" value="regular">'
-      : '';
+  const mboFields = `
+    <div class="flash info">The monthly MBO is approved when you submit it. Choose the rep, the amount and the month.</div>
+    <div class="field${errors.mbo_rep ? ' has-error' : ''}"><label for="mbo_rep">Rep</label>${repPicker('mbo_rep', o.reps || [], values.mbo_rep, 'mbo_rep')}${errors.mbo_rep ? `<div class="err">${esc(errors.mbo_rep)}</div>` : ''}</div>
+    ${input('mbo_amount', 'Amount ($)', values, errors, { type: 'number', step: '0.01' })}
+    ${input('mbo_month', 'Month', values, errors, { type: 'month' })}
+    ${textarea('mbo_description', 'Description (optional)', values, errors, { rows: 3 })}`;
 
   return page(
     ctx,
-    TYPES[type],
+    FORM_TYPES[type],
     `<a class="back" href="${requestId ? '/requests/' + requestId : '/request'}">&larr; Back</a>
-    <h1>${requestId ? 'Edit and resubmit: ' : ''}${esc(TYPES[type])}</h1>
+    <h1>${requestId ? 'Edit and resubmit: ' : ''}${esc(FORM_TYPES[type])}</h1>
     ${errorList}
-    <form method="post" action="${esc(action)}" class="panel" enctype="multipart/form-data">
+    <form method="post" action="${esc(action)}" class="panel" enctype="multipart/form-data"${type === 'bonus' || regularRecurring ? ' data-bonus="1"' : ''}>
       ${hidden}
-      ${bonusKindFields}
-      <div data-bonus-group="regular"${type === 'bonus' && values.bonus_kind !== 'regular' ? ' hidden' : ''}>
-        ${common}
-        ${isAdj ? adjFields : spifFields}
-        ${commissionPlan}
-      </div>
+      ${regularRecurring ? '<input type="hidden" name="bonus_kind" value="regular">' : ''}
+      ${isMbo ? mboFields : `${common}${isAdj ? adjFields : spifFields}${commissionPlan}`}
       <button class="btn">${esc(submitLabel)}</button>
     </form>`
   );
@@ -359,7 +393,6 @@ function termsTable(data, type, files) {
   add('Description', data.description);
   if (type === 'adjustment') {
     add('Deal or component', data.deal);
-    add('Adjustment size', data.adjustment_size);
     add('Reason', data.adjustment_reason);
   } else {
     add('Payout structure', PAYOUT_LABELS[data.payout_structure] || data.payout_structure);
@@ -380,6 +413,10 @@ function termsTable(data, type, files) {
     if (data.start_date) add('Run dates', `${data.start_date} to ${data.end_date}`);
     if (data.announce_date) add('Announced', `${data.announce_date} via ${data.announce_method}`);
     add('Eligibility and measurement', data.eligibility);
+    if (data.supporting_link) {
+      const safe = /^https?:\/\//i.test(data.supporting_link) ? data.supporting_link : '';
+      rows.push(`<tr><th>Supporting document link</th><td>${safe ? `<a href="${esc(safe)}" target="_blank" rel="noopener noreferrer">${esc(safe)}</a>` : esc(data.supporting_link)}</td></tr>`);
+    }
     if (files && files.length) rows.push(`<tr><th>Attached documents</th><td>${attachmentLinks(files)}</td></tr>`);
     add('Edge cases', data.edge_cases);
   }
@@ -388,19 +425,50 @@ function termsTable(data, type, files) {
 
 function scopeLabel(r) {
   if (r.approval_scope === 'once') return 'approved once';
-  if (r.approval_scope === 'half_year') {
-    return r.approval_through ? `approved through ${halfYearLabel(r.approval_through)} (${r.approval_through})` : 'approved through the end of the half year';
+  if (r.approval_scope === 'quarter' || r.approval_scope === 'half_year') {
+    return r.approval_through ? `approved through ${dateLabel(r.approval_through)} (${r.approval_through})` : 'approved through the end of the quarter';
   }
   return 'approved indefinitely (old approval type)';
 }
 
+// A status pill: white text on the status colour (see .pill in styles.css).
 function statusBadge(r, data, tz) {
-  return `<span class="badge s-${esc(r.status)}">${esc(displayStatus(r, data, tz))}</span>`;
+  return `<span class="pill s-${esc(r.status)}">${esc(displayStatus(r, data, tz))}</span>`;
 }
 
-function requestList(ctx, rows, queue, repTotals) {
+// Who made a decision, with "(admin)" when an admin acted on someone's behalf.
+const byLine = (name, byAdmin) => `${esc(name || 'system')}${byAdmin ? ' (admin)' : ''}`;
+
+// Audit rows written for an admin's decision carry as_admin in their detail.
+function adminAction(a) {
+  try {
+    return !!(a.detail_json && JSON.parse(a.detail_json).as_admin);
+  } catch (e) {
+    return false;
+  }
+}
+
+function requestList(ctx, rows, queue, repTotals, filt) {
   const tz = ctx.user.timezone;
   const totals = repTotals || {};
+  const f = filt || { query: {}, submitters: [], totalCount: rows.length };
+  const q = f.query || {};
+  const filtered = !!(q.from || q.to || q.status || q.submitter);
+  const filterBar = `<form method="get" action="/requests" class="filters">
+      <label>Submitted from <input type="date" name="from" value="${esc(q.from || '')}"></label>
+      <label>to <input type="date" name="to" value="${esc(q.to || '')}"></label>
+      <label>Status <select name="status"><option value="">All</option>${Object.entries(STATUS_LABELS)
+        .map(([v, l]) => `<option value="${esc(v)}"${q.status === v ? ' selected' : ''}>${esc(l.replace(/ \(.*\)$/, ''))}</option>`)
+        .join('')}</select></label>
+      ${
+        f.submitters.length > 1
+          ? `<label>Submitter <select name="submitter"><option value="">All</option>${f.submitters
+              .map(([id, name]) => `<option value="${id}"${String(q.submitter) === String(id) ? ' selected' : ''}>${esc(name)}</option>`)
+              .join('')}</select></label>`
+          : ''
+      }
+      <button class="chip selected">Filter</button>${filtered ? ' <a class="chip" href="/requests">Clear</a>' : ''}
+    </form>`;
   const table = (list) =>
     list.length
       ? `<table class="list"><thead><tr><th>#</th><th>Name</th><th>Type</th><th>Submitter</th><th>Run dates</th><th>Est. spend</th><th>Rep amounts</th><th>Status</th></tr></thead><tbody>
@@ -409,7 +477,7 @@ function requestList(ctx, rows, queue, repTotals) {
           (r) => `<tr>
         <td>${r.id}</td>
         <td><a href="/requests/${r.id}">${esc(r.name)}</a></td>
-        <td>${esc(TYPES[r.type])}</td>
+        <td><span class="tag">${esc(typeLabel(r.type, r.data))}</span></td>
         <td>${esc(r.submitter_name)}</td>
         <td>${r.data.start_date ? esc(r.data.start_date + ' to ' + r.data.end_date) : ''}</td>
         <td>${esc(money(r.data.estimated_spend))}</td>
@@ -417,7 +485,7 @@ function requestList(ctx, rows, queue, repTotals) {
         <td>${statusBadge(r, r.data, tz)}</td></tr>`
         )
         .join('')}</tbody></table>`
-      : '<p class="muted">Nothing here yet.</p>';
+      : `<div class="empty">${filtered ? 'No requests match these filters.' : 'Nothing here yet.'}</div>`;
   const mineOnly = ctx.user.role === 'submitter' && ctx.user.tier === 3;
   return page(
     ctx,
@@ -425,7 +493,8 @@ function requestList(ctx, rows, queue, repTotals) {
     `<a class="back" href="/">&larr; Home</a>
     <h1>Manage an Incentive</h1>
     ${queue.length ? `<h2>Waiting for your action (${queue.length})</h2>${table(queue)}` : ''}
-    <h2>${mineOnly ? 'Your requests' : 'All requests'}</h2>
+    <h2>${mineOnly ? 'Your requests' : 'All requests'} <span class="count">${filtered ? `${rows.length} of ${f.totalCount}` : rows.length}</span></h2>
+    ${filterBar}
     ${table(rows)}
     <p><a class="btn" href="/request">New request</a></p>`
   );
@@ -443,8 +512,22 @@ function requestDetail(ctx, o) {
         <td><input name="rep_note" value="${esc(x.note || '')}"></td>
         <td><button type="button" class="link rep-remove">Remove</button></td></tr>`;
   const blankRep = { rep_name: '', amount: '', note: '' };
+  const justification = o.justification || [];
+  const isAdminUser = ctx.user.role === 'admin';
+  const revOpsCalcs = data.calculated_by === 'commissions';
+  const proofFields = `<div class="field">
+        <label for="justification_files">Proof of your calculations${isAdminUser ? ' (optional for admins)' : ' (required)'}</label>
+        ${justification.length ? `<div class="hint">Already attached:</div><div>${attachmentLinks(justification)}</div>` : ''}
+        <input id="justification_files" name="justification_files" type="file" multiple accept=".pdf,.doc,.docx,.xls,.xlsx,.csv,.txt,.png,.jpg,.jpeg">
+        <div class="hint">${
+          isAdminUser
+            ? 'A screenshot or file showing how the amounts were calculated.'
+            : 'Because you calculate these amounts yourself, attach a screenshot or file showing how you got them. Amounts cannot be saved until something is attached, so Rev Ops and finance can verify the payouts. PDF, Excel, CSV, Word or image; 4 MB total.'
+        }</div>
+      </div>`;
   const repSection = o.canEditRepAmounts
-    ? `<form method="post" action="/requests/${r.id}/rep-amounts" class="panel" id="rep-form">${csrfField(ctx)}
+    ? `<form method="post" action="/requests/${r.id}/rep-amounts" enctype="multipart/form-data" class="panel" id="rep-form" data-needs-proof="${isAdminUser ? '0' : '1'}" data-has-proof="${justification.length ? '1' : '0'}">${csrfField(ctx)}
+      ${revOpsCalcs ? '<div class="flash info">RevOps calculates the payouts for this request. Upload the calculated amount for each rep below, or enter them by hand.</div>' : ''}
       <p class="hint">Winners and what each will make. Add a rep, enter an amount, and save. Remove a row to take that rep off. You can change this at any time, including after approval; every change is recorded in the activity log.</p>
       <table class="list"><thead><tr><th>Rep</th><th>Amount ($)</th><th>Note (optional)</th><th></th></tr></thead>
       <tbody id="rep-rows">${(repAmounts.length ? repAmounts : [blankRep]).map(repRow).join('')}</tbody></table>
@@ -452,28 +535,43 @@ function requestDetail(ctx, o) {
       <p><button type="button" class="btn secondary" id="rep-add">Add rep</button></p>
       <p id="rep-error" class="err" hidden></p>
       <p>Total: <strong id="rep-total">${esc(money(repTotal))}</strong></p>
+      <div class="field">
+        <label for="amounts_file">Or upload the amounts from a spreadsheet (optional)</label>
+        <input id="amounts_file" name="amounts_file" type="file" accept=".xlsx,.csv">
+        <div class="hint">An .xlsx or .csv file with a column for the rep's name, a column for the amount, and an optional note. Rep names must match the rep list. The uploaded rows replace the rows above when you save.</div>
+      </div>
+      ${revOpsCalcs && !isAdminUser ? '' : proofFields}
       <button class="btn">Save rep amounts</button>
     </form>`
     : repAmounts.length
     ? `<table class="list"><thead><tr><th>Rep</th><th>Amount</th><th>Note</th></tr></thead><tbody>
       ${repAmounts.map((x) => `<tr><td>${esc(x.rep_name)}</td><td>${esc(money(x.amount))}</td><td>${esc(x.note || '')}</td></tr>`).join('')}
-      <tr><th>Total</th><th>${esc(money(repTotal))}</th><th></th></tr></tbody></table>`
+      <tr><th>Total</th><th>${esc(money(repTotal))}</th><th></th></tr></tbody></table>${
+        justification.length ? `<p class="hint">Proof of calculations: ${attachmentLinks(justification)}</p>` : ''
+      }`
     : `<p class="muted">${
         data.calculated_by === 'commissions'
           ? 'Rev Ops will enter the winners and payout amounts.'
           : 'No rep amounts have been entered.'
       }</p>`;
   const attachments = o.attachments || [];
-  const filesFor = (version) => attachments.filter((a) => a.version === version);
+  // Only the request form's documents belong to a version's terms; calculation proof is shown with the rep amounts.
+  const filesFor = (version) => attachments.filter((a) => a.version === version && a.field === 'eligibility');
   const tz = ctx.user.timezone;
   const isAdj = r.type === 'adjustment';
   const reasoningBox = (required) =>
     `<div class="field"><label>Reasoning${required ? '' : ' (optional for approvals)'}</label><textarea name="reasoning" rows="3"></textarea></div>`;
 
+  // The decision forms (finance, approver, admin override) sit above the rep amounts; the rest follow.
+  const decisionForms = [];
   const forms = [];
+  const adminNote = actions.asAdmin
+    ? '<p class="hint">You are acting as an admin. This will be recorded as an admin action ("(admin)" next to your name) and Slack will say so.</p>'
+    : '';
   if (actions.finance) {
-    forms.push(`<form method="post" action="/requests/${r.id}/finance" class="panel">${csrfField(ctx)}
+    decisionForms.push(`<form method="post" action="/requests/${r.id}/finance" class="panel">${csrfField(ctx)}
       <h3>Finance review</h3>
+      ${adminNote}
       ${isAdj ? `<div class="flash info">${esc(ADJUSTMENT_GUIDE)}</div>` : ''}
       <div class="field"><label>Classification</label>
         <select name="classification">
@@ -494,26 +592,27 @@ function requestDetail(ctx, o) {
           : `<div class="field"><label>Approval scope</label>
         <select name="scope">
           <option value="once">Approve once (this month only)</option>
-          ${isAdj ? '' : `<option value="half_year">Approve through ${esc(halfYearLabel(actions.halfYearEnd))}</option>`}
+          ${isAdj ? '' : `<option value="quarter">Approve through the end of the quarter (${esc(dateLabel(actions.quarterEnd))})</option>`}
         </select></div>`
       }
       <button class="btn" name="action" value="classify">${r.submitter_tier === 1 ? 'Classify and approve' : 'Classify and send to approver'}</button>
     </form>`);
   }
   if (actions.approver) {
-    forms.push(`<form method="post" action="/requests/${r.id}/approver" class="panel">${csrfField(ctx)}
+    decisionForms.push(`<form method="post" action="/requests/${r.id}/approver" class="panel">${csrfField(ctx)}
       <h3>Approver decision</h3>
+      ${adminNote}
       ${isAdj ? `<div class="flash info">${esc(ADJUSTMENT_GUIDE)}</div>` : ''}
       ${reasoningBox(false)}
-      <button class="btn" name="action" value="approve_once">Approve once</button>
-      ${isAdj ? '' : `<button class="btn" name="action" value="approve_half_year">Approve through ${esc(halfYearLabel(actions.halfYearEnd))}</button>`}
+      <button class="btn" name="action" value="approve_once">Approve once (this month only)</button>
+      ${isAdj ? '' : `<button class="btn" name="action" value="approve_quarter">Approve through the end of the quarter (${esc(dateLabel(actions.quarterEnd))})</button>`}
       <button class="btn secondary" name="action" value="return">Return to submitter</button>
       <button class="btn danger" name="action" value="reject">Reject</button>
-      ${isAdj ? '' : `<p class="hint">Approve once covers this month only. Approving through ${esc(halfYearLabel(actions.halfYearEnd))} (${esc(actions.halfYearEnd)}) lets resubmissions with unchanged terms that end by then skip review; any change to the terms brings back full review.</p>`}
+      ${isAdj ? '' : `<p class="hint">Approve once covers this month only. Approving through the end of the quarter (${esc(actions.quarterEnd)}) lets resubmissions with unchanged terms that end by then skip review; any change to the terms brings back full review.</p>`}
     </form>`);
   }
   if (actions.skip) {
-    forms.push(`<form method="post" action="/requests/${r.id}/skip" class="panel">${csrfField(ctx)}
+    decisionForms.push(`<form method="post" action="/requests/${r.id}/skip" class="panel">${csrfField(ctx)}
       <h3>Admin override</h3>
       <p class="hint">Skips the step this request is waiting on. The reason is recorded in the audit log.</p>
       ${reasoningBox(true)}
@@ -543,7 +642,7 @@ function requestDetail(ctx, o) {
   const stepRows = steps
     .map(
       (s) => `<tr><td>v${s.version}</td><td>${esc(s.step.replace('_', ' '))}</td><td>${esc(s.decision)}</td>
-      <td>${esc(s.decided_by_name || 'system')}</td><td>${esc(fmtTs(s.decided_at, tz))}</td>
+      <td>${byLine(s.decided_by_name, s.by_admin)}</td><td>${esc(fmtTs(s.decided_at, tz))}</td>
       <td class="pre">${esc([s.detail, s.reasoning].filter(Boolean).join(': '))}</td></tr>`
     )
     .join('');
@@ -560,24 +659,35 @@ function requestDetail(ctx, o) {
     ? `<table class="list"><thead><tr><th>When</th><th>Who</th><th>Action</th><th>Detail</th></tr></thead><tbody>
       ${auditRows
         .map(
-          (a) => `<tr><td>${esc(fmtTs(a.ts, tz))}</td><td>${esc(a.user_name)}</td><td>${esc(a.action)}</td>
+          (a) => `<tr><td>${esc(fmtTs(a.ts, tz))}</td><td>${byLine(a.user_name, adminAction(a))}</td><td>${esc(a.action)}</td>
           <td class="pre">${esc(a.detail_json || '')}</td></tr>`
         )
         .join('')}</tbody></table>`
     : '';
+
+  // "Classified by X (admin)" / "Approved by Y (admin)" for the current version, shown under the title.
+  const stepNow = (name) => steps.filter((s) => s.step === name && s.version === r.current_version && s.decision !== 'skipped').pop();
+  const decidedBy = (label, s) => (s && s.decision === 'approved' ? `${label} ${byLine(s.decided_by_name, s.by_admin)}. ` : '');
+  const skipped = steps.filter((s) => s.version === r.current_version && s.decision === 'skipped' && s.decided_by_name);
+  const decidedLine =
+    decidedBy('Classified by', stepNow('finance')) +
+    decidedBy('Approved by', stepNow('approver')) +
+    skipped.map((s) => `${esc(s.step.replace('_', ' '))} step skipped by ${byLine(s.decided_by_name, s.by_admin)}. `).join('');
 
   return page(
     ctx,
     r.name,
     `<a class="back" href="/requests">&larr; Manage</a>
     <h1>${esc(r.name)} ${statusBadge(r, data, tz)}</h1>
-    <p class="subtitle">${esc(TYPES[r.type])} #${r.id}, submitted by ${esc(r.submitter_name)}.
+    <p class="subtitle">${esc(typeLabel(r.type, data))} #${r.id}, submitted by ${esc(r.submitter_name)}.
     ${r.classification ? `Finance: <strong>${esc(r.classification)}</strong>. ` : ''}
-    ${r.approval_scope ? `Approval: <strong>${esc(scopeLabel(r))}</strong>.` : ''}</p>
+    ${r.approval_scope ? `Approval: <strong>${esc(scopeLabel(r))}</strong>.` : ''}
+    ${decidedLine ? `<br>${decidedLine}` : ''}</p>
     ${r.finance_concern ? `<div class="flash warn"><strong>Finance concern:</strong> <span class="pre">${esc(r.finance_concern)}</span></div>` : ''}
     ${isAdj ? `<div class="flash info">${esc(ADJUSTMENT_GUIDE)}</div>` : ''}
     <h2>Current terms</h2>
     ${termsTable(data, r.type, filesFor(r.current_version))}
+    ${decisionForms.join('')}
     <h2>Rep amounts</h2>
     ${repSection}
     ${forms.join('')}
@@ -601,7 +711,7 @@ function savedList(ctx, rows) {
     'Recurring SPIFs',
     `<a class="back" href="/request">&larr; Back</a>
     <h1>Recurring SPIFs</h1>
-    <p class="subtitle">Any approved SPIF can be resubmitted. Pick one, enter the new start and end dates, and resubmit. Everything else is prefilled. It goes through approval again unless its terms are unchanged and a half-year approval still covers the run.${
+    <p class="subtitle">Any approved SPIF can be resubmitted. Pick one, enter the new start and end dates, and resubmit. Everything else is prefilled. It goes through approval again unless its terms are unchanged and a quarterly approval still covers the run. "Resubmit with changes" always goes through approval.${
       ctx.user.role === 'submitter' && ctx.user.tier === 3 ? ' You see only SPIFs you submitted.' : ''
     }</p>
     ${
@@ -611,7 +721,7 @@ function savedList(ctx, rows) {
               const standing = s.standing;
               const through = standing && standing.approved_through >= today ? standing.approved_through : null;
               return `<div class="panel">
-          <h3>${esc(s.name)} ${through ? `<span class="badge s-approved">Approved through ${esc(halfYearLabel(through))}</span>` : ''}</h3>
+          <h3>${esc(s.name)} ${through ? `<span class="pill s-approved">Approved through ${esc(dateLabel(through))}</span>` : ''}</h3>
           ${ctx.user.role === 'submitter' && ctx.user.tier === 3 ? '' : `<p class="muted">Submitted by ${esc(s.submitter_name)}</p>`}
           <details><summary>View terms</summary>${termsTable(s.data, 'new_spif')}</details>
           <form method="post" action="/saved/${s.id}/resubmit">
@@ -625,7 +735,7 @@ function savedList(ctx, rows) {
           </form>
           ${
             ctx.user.role === 'admin' && standing
-              ? `<form method="post" action="/saved/${s.id}/revoke" class="inline">${csrfField(ctx)}<button class="link">Revoke approval through ${esc(halfYearLabel(standing.approved_through))} and deactivate</button></form>`
+              ? `<form method="post" action="/saved/${s.id}/revoke" class="inline">${csrfField(ctx)}<button class="link">Revoke approval through ${esc(dateLabel(standing.approved_through))} and deactivate</button></form>`
               : ''
           }
         </div>`;
@@ -636,18 +746,21 @@ function savedList(ctx, rows) {
   );
 }
 
-// Reports are admin-only for now; everyone else sees a placeholder.
-function reportsComingSoon(ctx) {
+// Reports are marked "Coming soon" until real reports exist. Admins also get a preview of the
+// unfinished tables below the notice; preview is { data, year, years } for them and null for everyone else.
+function reports(ctx, preview) {
   return page(
     ctx,
     'Reports',
     `<a class="back" href="/">&larr; Home</a>
-    <h1>Reports</h1>
-    <p class="subtitle">Coming Soon</p>`
+    <h1>Reports <span class="pill soon">Coming soon</span></h1>
+    <p class="subtitle">Spend by submitter, SPIF, and month.</p>
+    <div class="empty">Reports are coming soon. This page will fill in once real reports are built.</div>
+    ${preview ? `<h2 class="preview-title">Admin preview <span class="count">unfinished, visible to admins only</span></h2>${reportTables(ctx, preview.data, preview.year, preview.years)}` : ''}`
   );
 }
 
-function reports(ctx, data, year, years) {
+function reportTables(ctx, data, year, years) {
   const t = (rows, label) =>
     rows.length
       ? `<table class="list"><thead><tr><th>${label}</th><th>Count</th><th>Estimated</th><th>Actual (finalized)</th><th>Spend used</th></tr></thead><tbody>
@@ -657,12 +770,7 @@ function reports(ctx, data, year, years) {
         )
         .join('')}</tbody></table>`
       : '<p class="muted">No data for this year.</p>';
-  return page(
-    ctx,
-    'Reports',
-    `<a class="back" href="/">&larr; Home</a>
-    <h1>Reports</h1>
-    <form method="get" action="/reports" class="inline">
+  return `<form method="get" action="/reports" class="inline">
       <label>Year <select name="year" onchange="this.form.submit()">
         ${years.map((y) => `<option${y === year ? ' selected' : ''}>${y}</option>`).join('')}
       </select></label>
@@ -694,8 +802,7 @@ function reports(ctx, data, year, years) {
         )
         .join('')}</tbody></table>`
         : '<p class="muted">No data for this year.</p>'
-    }`
-  );
+    }`;
 }
 
 function auditPage(ctx, rows, requestId) {
@@ -709,7 +816,7 @@ function auditPage(ctx, rows, requestId) {
     <table class="list"><thead><tr><th>When</th><th>Who</th><th>Action</th><th>Request</th><th>Detail</th></tr></thead><tbody>
     ${rows
       .map(
-        (a) => `<tr><td>${esc(fmtTs(a.ts, tz))}</td><td>${esc(a.user_name)}</td><td>${esc(a.action)}</td>
+        (a) => `<tr><td>${esc(fmtTs(a.ts, tz))}</td><td>${byLine(a.user_name, adminAction(a))}</td><td>${esc(a.action)}</td>
         <td>${a.request_id ? `<a href="/requests/${a.request_id}">#${a.request_id}</a>` : ''}</td>
         <td class="pre">${esc(a.detail_json || '')}</td></tr>`
       )
@@ -754,6 +861,21 @@ function admin(ctx, o) {
     'Admin',
     `<a class="back" href="/">&larr; Home</a>
     <h1>Admin</h1>
+
+    <h2 id="view-as">View as</h2>
+    <form method="post" action="/view-as" class="panel">
+      ${csrfField(ctx)}
+      <p class="hint">See the app exactly as another user sees it, to test each role's experience. It is read-only: nothing can be submitted, approved or changed while you are viewing as someone else, and starting it is written to the audit log.</p>
+      <div class="field"><label for="view-as-user">User</label>
+        <select id="view-as-user" name="user_id" required>
+          <option value="">Select a user...</option>
+          ${users
+            .filter((x) => x.active && x.id !== ctx.user.id)
+            .map((x) => `<option value="${x.id}">${esc(x.name)} (${esc(ROLE_LABELS[roleKey(x)])}${x.role === 'submitter' ? ', tier ' + x.tier : ''})</option>`)
+            .join('')}
+        </select></div>
+      <button class="btn">View as this user</button>
+    </form>
 
     <h2>Pending approvals (${pendingRows.length})</h2>
     ${
@@ -859,7 +981,7 @@ module.exports = {
   requestDetail,
   savedList,
   reports,
-  reportsComingSoon,
+
   auditPage,
   admin,
   account,
