@@ -169,7 +169,14 @@ function participantsFields(values, errors, label) {
 
 // ------------------------------------------------------------ pages
 
-function login(ctx, error) {
+function login(ctx, error, opts = {}) {
+  const { sso = false, breakGlass = false } = opts;
+  const passwordForm = `<form method="post" action="/login" class="panel narrow">
+      ${csrfField(ctx)}
+      <div class="field"><label for="email">Email</label><input id="email" name="email" type="email" autocomplete="username" required></div>
+      <div class="field"><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password" required></div>
+      <button class="btn">Sign in</button>
+    </form>`;
   return page(
     ctx,
     'Sign in',
@@ -177,12 +184,8 @@ function login(ctx, error) {
     <h1>Sales Incentive Manager</h1>
     <p class="subtitle">Sign in to request, manage, and review incentives.</p>
     ${error ? `<div class="flash error">${esc(error)}</div>` : ''}
-    <form method="post" action="/login" class="panel narrow">
-      ${csrfField(ctx)}
-      <div class="field"><label for="email">Email</label><input id="email" name="email" type="email" autocomplete="username" required></div>
-      <div class="field"><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password" required></div>
-      <button class="btn">Sign in</button>
-    </form>
+    ${sso ? '<p><a class="btn" href="/auth/microsoft">Sign in with Microsoft</a></p>' : ''}
+    ${!sso || breakGlass ? passwordForm : ''}
     </div>`
   );
 }

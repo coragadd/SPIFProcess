@@ -343,6 +343,10 @@ function ready() {
       if (!cols.includes('finance_viewer')) {
         await client.execute('ALTER TABLE users ADD COLUMN finance_viewer INTEGER NOT NULL DEFAULT 0');
       }
+      // Entra object ID, stored on first Microsoft sign-in so later logins match on it, not email.
+      if (!cols.includes('entra_oid')) {
+        await client.execute('ALTER TABLE users ADD COLUMN entra_oid TEXT');
+      }
       await seedReps();
       await seedAdmin();
     })().catch((e) => {

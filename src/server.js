@@ -9,6 +9,7 @@ const multer = require('multer');
 const { db, audit, ready, getBlob } = require('./db');
 const wf = require('./workflow');
 const views = require('./views');
+const sso = require('./sso');
 const { notifyRequest, notifyRepAmounts } = require('./notify');
 
 const { UserError } = wf;
@@ -217,30 +218,82 @@ async function tooManyAttempts(key) {
 
 // ---------------------------------------------------------------- auth
 
+// Once Microsoft SSO is configured, password sign-in is kept only as a break-glass path for the
+// admins listed in BREAK_GLASS_EMAILS (default: ADMIN_EMAIL), reached at /login?admin=1.
+const breakGlass = () =>
+  String(process.env.BREAK_GLASS_EMAILS || process.env.ADMIN_EMAIL || '')
+    .split(',')
+    .map((e) => e.trim().toLowerCase())
+    .filter(Boolean);
+
 app.get('/login', (req, res) => {
   if (req.user) return res.redirect('/');
-  res.send(views.login(ctx(req)));
+  const error = req.session && req.session.ssoError;
+  if (error) req.session.ssoError = null;
+  res.send(views.login(ctx(req), error, { sso: sso.enabled(), breakGlass: req.query.admin === '1' }));
 });
+
+app.get('/auth/microsoft', (req, res) => {
+  if (!sso.enabled()) return notFound(res);
+  const { url, sso: saved } = sso.start(req);
+  req.session = { csrf: req.session.csrf, sso: saved };
+  res.redirect(url);
+});
+
+app.get(
+  '/auth/microsoft/callback',
+  wrap(async (req, res) => {
+    if (!sso.enabled()) return notFound(res);
+    const fail = (msg) => {
+      req.session = { csrf: req.session.csrf, ssoError: msg };
+      res.redirect('/login');
+    };
+    if (req.query.error) {
+      console.error('Entra sign-in error:', req.query.error, req.query.error_description);
+      return fail('Microsoft sign-in was cancelled or denied.');
+    }
+    let id;
+    try {
+      id = await sso.finish(req, req.session.sso);
+    } catch (e) {
+      return fail(e.message);
+    }
+    // Match on the stored Entra object ID first; the first time, match on email and store the ID.
+    let u = await db.prepare('SELECT * FROM users WHERE entra_oid = ?').get(id.oid);
+    if (!u && id.email) {
+      u = await db.prepare('SELECT * FROM users WHERE email = ? AND (entra_oid IS NULL OR entra_oid = ?)').get(id.email, id.oid);
+      if (u && u.active) await db.prepare('UPDATE users SET entra_oid = ? WHERE id = ?').run(id.oid, u.id);
+    }
+    if (!u || !u.active) {
+      await audit(null, 'user.login_denied', 'user', u ? u.id : null, null, { email: id.email, via: 'entra', reason: u ? 'inactive' : 'no_user' });
+      return fail('Your Microsoft account has no access to this app. Ask an admin to add you.');
+    }
+    req.session = { uid: u.id, csrf: crypto.randomBytes(24).toString('hex') };
+    await audit(u, 'user.login', 'user', u.id, null, { via: 'entra' });
+    res.redirect('/');
+  })
+);
 
 app.post(
   '/login',
   wrap(async (req, res) => {
     const email = String(req.body.email || '').trim().toLowerCase();
+    const ssoOn = sso.enabled();
     const key = req.ip + '|' + email;
     if (await tooManyAttempts(key)) {
-      return res.status(429).send(views.login(ctx(req), 'Too many attempts. Try again in 15 minutes.'));
+      return res.status(429).send(views.login(ctx(req), 'Too many attempts. Try again in 15 minutes.', { sso: ssoOn, breakGlass: ssoOn }));
     }
     const u = await db.prepare('SELECT * FROM users WHERE email = ? AND active = 1').get(email);
     // Compare against a dummy hash for unknown users so timing does not reveal which emails exist.
     const hash = u ? u.password_hash : '$2a$10$7EqJtq98hPqEX7fNZaFWoOa1hX4cG6Vf7sT0n7y3Y6mZy0kq1QJ5e';
-    const ok = bcrypt.compareSync(String(req.body.password || ''), hash);
+    const ok = bcrypt.compareSync(String(req.body.password || ''), hash) && (!ssoOn || (u && breakGlass().includes(email)));
     if (!u || !ok) {
       await db.prepare('INSERT INTO login_attempts (key, ts) VALUES (?, ?)').run(key, Date.now());
-      return res.status(401).send(views.login(ctx(req), 'Incorrect email or password.'));
+      return res.status(401).send(views.login(ctx(req), 'Incorrect email or password.', { sso: ssoOn, breakGlass: ssoOn }));
     }
     await db.prepare('DELETE FROM login_attempts WHERE key = ?').run(key);
     req.session = { uid: u.id, csrf: crypto.randomBytes(24).toString('hex') };
-    await audit(u, 'user.login', 'user', u.id, null, null);
+    await audit(u, 'user.login', 'user', u.id, null, ssoOn ? { via: 'break_glass_password' } : null);
     res.redirect('/');
   })
 );

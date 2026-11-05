@@ -19,6 +19,11 @@ Node + Express, server-rendered pages, hosted on Vercel as a serverless function
 | `TURSO_DATABASE_URL` | yes (on Vercel) | `libsql://<db>.turso.io`. When unset, a SQLite file in `DATA_DIR` or `./data` is used (local runs) |
 | `TURSO_AUTH_TOKEN` | yes (on Vercel) | Token for that database |
 | `APP_URL` | optional | Base URL used in Slack links. Defaults to the Vercel production URL, then the request's host |
+| `ENTRA_CLIENT_ID` | for SSO | Entra app (client) ID. Falls back to `CLIENT_ID` |
+| `ENTRA_CLIENT_SECRET` | for SSO | Entra client secret value. Falls back to `SECRET_VALUE`. SSO turns on when both are set |
+| `ENTRA_TENANT_ID` | optional | Entra directory (tenant) ID; defaults to Quilt's tenant |
+| `ENTRA_REDIRECT_URI` | optional | Defaults to `APP_URL` (or the request host) + `/auth/microsoft/callback`; must match Entra exactly |
+| `BREAK_GLASS_EMAILS` | optional | Comma-separated admins who can still use password sign-in at `/login?admin=1` once SSO is on. Defaults to `ADMIN_EMAIL` |
 | `SLACK_BOT_TOKEN` | for Slack | Bot token with `chat:write`; sends to channels and DMs |
 | `SLACK_FINANCE_CHANNEL_ID` | for Slack | Channel for "needs finance action" |
 | `SLACK_COMMISSION_CHANNEL_ID` | for Slack | Channel for "needs the commissions team" |
