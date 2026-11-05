@@ -808,14 +808,14 @@ app.post(
   requireRole('admin'),
   wrap(async (req, res) => {
     const u = await cleanUserInput(req.body);
-    if (!u.password) throw new UserError('A temporary password is required.');
+    if (!u.password && !sso.enabled()) throw new UserError('A temporary password is required.');
     const tier = u.role === 'admin' ? 3 : u.tier || 3;
     try {
       const info = await db
         .prepare(
           'INSERT INTO users (name, email, password_hash, role, finance_viewer, tier, tier1_id, tier2_id, timezone, slack_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
         )
-        .run(u.name, u.email, bcrypt.hashSync(u.password, 10), u.role, u.financeViewer, tier, u.tier1Id, u.tier2Id, u.timezone, u.slackId);
+        .run(u.name, u.email, bcrypt.hashSync(u.password || crypto.randomBytes(24).toString('hex'), 10), u.role, u.financeViewer, tier, u.tier1Id, u.tier2Id, u.timezone, u.slackId);
       await audit(req.user, 'user.created', 'user', info.lastInsertRowid, null, {
         email: u.email,
         role: u.role,

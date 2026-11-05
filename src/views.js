@@ -784,7 +784,7 @@ function admin(ctx, o) {
         ${reportFields(null)}
         <div class="row">
           <div class="field"><label>Slack member ID (optional)</label><input name="slack_id" placeholder="U01ABCDE234"></div>
-          <div class="field"><label>Temporary password (min 10 characters)</label><input name="password" type="password" autocomplete="new-password" required></div>
+          <div class="field"><label>Temporary password (leave blank when using Microsoft sign-in; min 10 characters)</label><input name="password" type="password" autocomplete="new-password"></div>
         </div>
         <button class="btn">Add user</button>
       </form>
