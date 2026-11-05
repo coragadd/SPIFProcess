@@ -66,7 +66,7 @@ function page(ctx, title, body) {
   return `<!DOCTYPE html>
 <html lang="en"><head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>${esc(title)} | SPIF Process</title>
+<title>${esc(title)} | Sales Incentive Manager</title>
 <link rel="stylesheet" href="/static/styles.css">
 </head><body>${nav}<main class="container">${flash}${body}</main><script src="/static/app.js"></script></body></html>`;
 }
@@ -172,7 +172,7 @@ function login(ctx, error) {
     ctx,
     'Sign in',
     `<div class="login">
-    <h1>SPIF Process</h1>
+    <h1>Sales Incentive Manager</h1>
     <p class="subtitle">Sign in to request, manage, and review incentives.</p>
     ${error ? `<div class="flash error">${esc(error)}</div>` : ''}
     <form method="post" action="/login" class="panel narrow">
@@ -193,7 +193,7 @@ function home(ctx, pendingCount) {
   return page(
     ctx,
     'Home',
-    `<h1>SPIF Process</h1>
+    `<h1>Sales Incentive Manager</h1>
     <p class="subtitle">What would you like to do?</p>
     ${banner}
     <nav class="options">
