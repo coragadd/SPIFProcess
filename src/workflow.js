@@ -12,9 +12,9 @@ const TYPES = {
 };
 // The Monthly MBO has its own form but is stored as a bonus with bonus_kind = 'mbo' (the requests
 // table only allows the four types above). Form titles and list labels come from here.
-const FORM_TYPES = { ...TYPES, mbo: 'Monthly MBO' };
+const FORM_TYPES = { ...TYPES, mbo: 'MBO' };
 function typeLabel(type, data) {
-  return data && data.bonus_kind === 'mbo' ? 'Monthly MBO' : TYPES[type] || type;
+  return data && data.bonus_kind === 'mbo' ? 'MBO' : TYPES[type] || type;
 }
 
 const STATUS_LABELS = {
@@ -824,9 +824,9 @@ const createMbo = db.transaction(async (user, data) => {
     'INSERT INTO request_versions (request_id, version, data_json, terms_hash, created_by) VALUES (?, 1, ?, ?, ?)'
   ).run(id, JSON.stringify(data), hashTerms(data, []), user.id);
   await audit(user, 'request.submitted', 'request', id, id, { type: 'bonus', kind: 'mbo', name, version: 1 });
-  const note = 'Monthly MBO does not need approval';
-  await addStep(id, 1, 'finance', 'skipped', note, 'monthly MBO', null);
-  await addStep(id, 1, 'approver', 'skipped', note, 'monthly MBO', null);
+  const note = 'MBO does not need approval';
+  await addStep(id, 1, 'finance', 'skipped', note, 'MBO', null);
+  await addStep(id, 1, 'approver', 'skipped', note, 'MBO', null);
   await db.prepare('INSERT INTO rep_amounts (request_id, rep_name, amount, note, updated_by) VALUES (?, ?, ?, ?, ?)').run(
     id,
     data.mbo_rep,

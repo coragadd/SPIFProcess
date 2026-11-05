@@ -261,7 +261,7 @@ function requestChooser(ctx) {
       <a class="card" href="/requests/new?type=new_spif"><h2>New SPIF</h2><p>A SPIF that has not run before.</p></a>
       <a class="card" href="/saved"><h2>Recurring SPIF</h2><p>Pick a saved SPIF and resubmit it with new dates.</p></a>
       <a class="card" href="/requests/new?type=bonus"><h2>Bonus</h2><p>A regular bonus. It goes through finance and approval.</p></a>
-      <a class="card" href="/requests/new?type=mbo"><h2>Monthly MBO</h2><p>One rep, one amount, one month. No approval needed.</p></a>
+      <a class="card" href="/requests/new?type=mbo"><h2>MBO</h2><p>One rep and one amount. No approval needed.</p></a>
       <a class="card" href="/requests/new?type=adjustment"><h2>Adjustment</h2><p>A commission adjustment, on a deal, a component, or neither.</p></a>
     </nav>`
   );
@@ -354,7 +354,7 @@ function requestForm(ctx, o) {
       ? select('commission_plan', 'Does this need to be written into the commission plan?', values, errors, [['yes', 'Yes'], ['no', 'No']])
       : '';
   const mboFields = `
-    <div class="flash info">The monthly MBO is approved when you submit it. Choose the rep, the amount and the month.</div>
+    <div class="flash info">The MBO is approved when you submit it. Choose the rep, the amount and the month.</div>
     <div class="field${errors.mbo_rep ? ' has-error' : ''}"><label for="mbo_rep">Rep</label>${repPicker('mbo_rep', o.reps || [], values.mbo_rep, 'mbo_rep')}${errors.mbo_rep ? `<div class="err">${esc(errors.mbo_rep)}</div>` : ''}</div>
     ${input('mbo_amount', 'Amount ($)', values, errors, { type: 'number', step: '0.01' })}
     ${input('mbo_month', 'Month', values, errors, { type: 'month' })}
@@ -381,7 +381,7 @@ function termsTable(data, type, files) {
     if (val !== '' && val != null) rows.push(`<tr><th>${esc(label)}</th><td class="pre">${esc(val)}</td></tr>`);
   };
   if (data.bonus_kind === 'mbo') {
-    add('Bonus type', 'Monthly MBO (no approval needed)');
+    add('Bonus type', 'MBO (no approval needed)');
     add('Rep', data.mbo_rep);
     add('Amount', money(data.mbo_amount));
     add('Month', data.mbo_month);

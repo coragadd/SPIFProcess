@@ -521,7 +521,7 @@ app.post(
     if (data.bonus_kind === 'mbo') {
       const mboId = await wf.createMbo(req.user, data);
       await notifyRequest(req, mboId);
-      flash(req, 'success', 'Monthly MBO recorded. It does not need approval.');
+      flash(req, 'success', 'MBO recorded. It does not need approval.');
       return res.redirect('/requests/' + mboId);
     }
     // This form is "Resubmit with changes" for a recurring SPIF, so it always goes through full review.
