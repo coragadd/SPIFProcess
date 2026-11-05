@@ -90,7 +90,9 @@ CREATE TABLE IF NOT EXISTS users (
   slack_id TEXT,
   -- Tiers: 1 and 2 can both request and approve (tier 1 needs only finance, tier 2 needs a tier 1
   -- approver); tier 3 can only request (needs a tier 1 or 2 approver). Admins have no tier.
-  tier INTEGER NOT NULL DEFAULT 3
+  tier INTEGER NOT NULL DEFAULT 3,
+  -- Finance users only: 1 = viewer (can see SPIFs and pending requests but not classify them).
+  finance_viewer INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS settings (
@@ -336,6 +338,11 @@ function ready() {
   if (!readyPromise) {
     readyPromise = (async () => {
       await client.executeMultiple(SCHEMA);
+      // Databases created before finance viewers existed lack the column.
+      const cols = (await client.execute('PRAGMA table_info(users)')).rows.map((c) => c.name);
+      if (!cols.includes('finance_viewer')) {
+        await client.execute('ALTER TABLE users ADD COLUMN finance_viewer INTEGER NOT NULL DEFAULT 0');
+      }
       await seedReps();
       await seedAdmin();
     })().catch((e) => {

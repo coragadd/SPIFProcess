@@ -415,6 +415,11 @@ async function currentData(r) {
   return JSON.parse(v.data_json);
 }
 
+// Finance viewers can see everything finance sees but cannot classify; admins always can.
+function canClassify(user) {
+  return user.role === 'admin' || (user.role === 'finance' && !user.finance_viewer);
+}
+
 function canView(user, r) {
   if (['admin', 'finance'].includes(user.role)) return true;
   if (r.submitter_id === user.id) return true;
@@ -437,7 +442,7 @@ async function listRequests(user) {
 function queueFor(user, rows) {
   return rows.filter(
     (r) =>
-      (r.status === 'finance_review' && ['finance', 'admin'].includes(user.role) && r.submitter_id !== user.id) ||
+      (r.status === 'finance_review' && canClassify(user) && r.submitter_id !== user.id) ||
       (r.status === 'approver_review' && canApprove(user, r))
   );
 }
@@ -447,7 +452,7 @@ function availableActions(user, r, data) {
   const self = user.id === r.submitter_id;
   const today = todayIn(user.timezone || 'America/New_York');
   return {
-    finance: r.status === 'finance_review' && ['finance', 'admin'].includes(user.role) && !self,
+    finance: r.status === 'finance_review' && canClassify(user) && !self,
     approver: r.status === 'approver_review' && canApprove(user, r),
     skip: pending && user.role === 'admin' && !self,
     halfYearEnd: halfYearEnd(today),
@@ -760,7 +765,7 @@ const financeDecide = db.transaction(async (user, id, input) => {
   const r = await getRequest(id);
   if (!r) throw new UserError('Request not found.');
   if (r.status !== 'finance_review') throw new UserError('This request is not awaiting finance.');
-  if (!['finance', 'admin'].includes(user.role)) throw new UserError('Only finance can classify requests.');
+  if (!canClassify(user)) throw new UserError('Only finance classifiers can classify requests.');
   if (r.submitter_id === user.id) throw new UserError('You cannot review your own request.');
   const reasoning = String(input.reasoning || '').trim();
   const action = input.action;
@@ -976,6 +981,7 @@ module.exports = {
   saveRepAmounts,
   displayStatus,
   isApprover,
+  canClassify,
   createRequest,
   createMbo,
   resubmitRequest,

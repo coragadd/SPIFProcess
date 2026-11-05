@@ -25,7 +25,9 @@ function fmtTs(ts, tz) {
   }
 }
 
-const ROLE_LABELS = { submitter: 'Standard', finance: 'Finance', admin: 'Admin' };
+const ROLE_LABELS = { submitter: 'Standard', finance: 'Finance (Classifier)', finance_viewer: 'Finance (Viewer)', admin: 'Admin' };
+// The role shown and edited for a user: finance viewers are a flavor of the finance role.
+const roleKey = (u) => (u.role === 'finance' && u.finance_viewer ? 'finance_viewer' : u.role);
 const TIER_LABELS = {
   1: 'Tier 1 (requests and approves)',
   2: 'Tier 2 (requests and approves)',
@@ -58,7 +60,7 @@ function page(ctx, title, body) {
         ${u.role !== 'submitter' || u.tier <= 2 ? '<a href="/audit">Audit log</a>' : ''}
         ${u.role === 'admin' ? '<a href="/admin">Admin</a>' : ''}
         <span class="spacer"></span>
-        <a href="/account">${esc(u.name)} (${esc(ROLE_LABELS[u.role])})</a>
+        <a href="/account">${esc(u.name)} (${esc(ROLE_LABELS[roleKey(u)])})</a>
         <form method="post" action="/logout" class="inline">${csrfField(ctx)}<button class="link">Sign out</button></form>
       </nav>`
     : '';
@@ -791,7 +793,7 @@ function admin(ctx, o) {
     ${users
       .map(
         (u) => `<tr class="user-line${u.active ? '' : ' inactive'}" tabindex="0" title="Click to edit">
-        <td class="uname">${esc(u.name)}</td><td>${esc(u.email)}</td><td>${esc(ROLE_LABELS[u.role])}</td>
+        <td class="uname">${esc(u.name)}</td><td>${esc(u.email)}</td><td>${esc(ROLE_LABELS[roleKey(u)])}</td>
         <td>${u.role !== 'submitter' ? '' : u.tier}</td><td>${esc(byId.get(u.tier2_id) || '')}</td><td>${esc(byId.get(u.tier1_id) || '')}</td><td>${esc(u.timezone)}</td><td>${esc(u.slack_id || '')}</td>
         <td>${u.active ? 'Active' : 'Inactive'}</td></tr>
       <tr class="user-edit" hidden><td colspan="9">
@@ -802,7 +804,7 @@ function admin(ctx, o) {
         <div class="field"><label>Email</label><input name="email" type="email" value="${esc(u.email)}" required></div>
       </div>
       <div class="row">
-        <div class="field"><label>Role</label><select name="role">${roleOptions(u.role)}</select></div>
+        <div class="field"><label>Role</label><select name="role">${roleOptions(roleKey(u))}</select></div>
         <div class="field" data-tier-field${u.role !== 'submitter' ? ' hidden' : ''}><label>Tier</label><select name="tier">${tierOptions(u.tier)}</select></div>
         <div class="field"><label>Time zone</label><select name="timezone">${tzOptions(u.timezone)}</select></div>
         <div class="field"><label>Status</label><select name="active"><option value="1"${u.active ? ' selected' : ''}>Active</option><option value="0"${u.active ? '' : ' selected'}>Inactive</option></select></div>
@@ -834,7 +836,7 @@ function account(ctx) {
     <h1>Your account</h1>
     <form method="post" action="/account" class="panel narrow">
       ${csrfField(ctx)}
-      <p>${esc(u.name)}, ${esc(u.email)}, ${esc(ROLE_LABELS[u.role])}${u.role === 'submitter' ? ', ' + esc(TIER_LABELS[u.tier]) : ''}</p>
+      <p>${esc(u.name)}, ${esc(u.email)}, ${esc(ROLE_LABELS[roleKey(u)])}${u.role === 'submitter' ? ', ' + esc(TIER_LABELS[u.tier]) : ''}</p>
       <div class="field"><label>Time zone</label><div class="hint">Dates and the "must be after today" rule use this.</div>
         <select name="timezone">${tzOptions(u.timezone)}</select></div>
       <div class="field"><label>New password (leave blank to keep, min 10 characters)</label><input name="password" type="password" autocomplete="new-password"></div>

@@ -613,7 +613,7 @@ app.get(
 
 // ---------------------------------------------------------------- admin
 
-const ROLES = ['submitter', 'finance', 'admin'];
+const ROLES = ['submitter', 'finance', 'finance_viewer', 'admin'];
 
 app.get(
   '/admin',
@@ -705,7 +705,10 @@ app.get(
 async function cleanUserInput(body, selfId, legacy) {
   const name = String(body.name || '').trim();
   const email = String(body.email || '').trim().toLowerCase();
-  const role = String(body.role || '');
+  const roleChoice = String(body.role || '');
+  // 'finance_viewer' is stored as the finance role with the viewer flag set.
+  const role = roleChoice === 'finance_viewer' ? 'finance' : roleChoice;
+  const financeViewer = roleChoice === 'finance_viewer' ? 1 : 0;
   // Only standard users have a tier field; `tier` is null and callers keep the stored value (3 for new users).
   const tier = role !== 'submitter' ? null : Number(body.tier);
   const timezone = String(body.timezone || '');
@@ -713,7 +716,7 @@ async function cleanUserInput(body, selfId, legacy) {
   const slackId = String(body.slack_id || '').trim();
   if (!name) throw new UserError('Name is required.');
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new UserError('Enter a valid email address.');
-  if (!ROLES.includes(role)) throw new UserError('Choose a valid role.');
+  if (!ROLES.includes(roleChoice)) throw new UserError('Choose a valid role.');
   if (role === 'submitter' && ![1, 2, 3].includes(tier)) throw new UserError('Choose a tier.');
   if (!wf.isValidTz(timezone)) throw new UserError('Choose a valid time zone.');
   if (password && password.length < 10) throw new UserError('Passwords need at least 10 characters.');
@@ -737,7 +740,7 @@ async function cleanUserInput(body, selfId, legacy) {
   } else if (role === 'submitter' && tier === 2) {
     tier1Id = await pick('tier1_id', 1, 'approver');
   }
-  return { name, email, role, tier, tier1Id, tier2Id, timezone, password, slackId: slackId || null };
+  return { name, email, role, financeViewer, tier, tier1Id, tier2Id, timezone, password, slackId: slackId || null };
 }
 
 function constraintToUserError(e) {
@@ -757,12 +760,13 @@ app.post(
     try {
       const info = await db
         .prepare(
-          'INSERT INTO users (name, email, password_hash, role, tier, tier1_id, tier2_id, timezone, slack_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+          'INSERT INTO users (name, email, password_hash, role, finance_viewer, tier, tier1_id, tier2_id, timezone, slack_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
         )
-        .run(u.name, u.email, bcrypt.hashSync(u.password, 10), u.role, tier, u.tier1Id, u.tier2Id, u.timezone, u.slackId);
+        .run(u.name, u.email, bcrypt.hashSync(u.password, 10), u.role, u.financeViewer, tier, u.tier1Id, u.tier2Id, u.timezone, u.slackId);
       await audit(req.user, 'user.created', 'user', info.lastInsertRowid, null, {
         email: u.email,
         role: u.role,
+        finance_viewer: u.financeViewer,
         tier,
         tier1_id: u.tier1Id,
         tier2_id: u.tier2Id,
@@ -791,11 +795,12 @@ app.post(
     const tier = u.role === 'admin' ? 3 : u.tier || before.tier;
     try {
       await db.prepare(
-        'UPDATE users SET name = ?, email = ?, role = ?, tier = ?, tier1_id = ?, tier2_id = ?, timezone = ?, slack_id = ?, active = ? WHERE id = ?'
+        'UPDATE users SET name = ?, email = ?, role = ?, finance_viewer = ?, tier = ?, tier1_id = ?, tier2_id = ?, timezone = ?, slack_id = ?, active = ? WHERE id = ?'
       ).run(
         u.name,
         u.email,
         u.role,
+        u.financeViewer,
         tier,
         u.tier1Id,
         u.tier2Id,
@@ -809,8 +814,8 @@ app.post(
       throw constraintToUserError(e);
     }
     await audit(req.user, 'user.updated', 'user', id, null, {
-      before: { name: before.name, email: before.email, role: before.role, tier: before.tier, active: before.active, timezone: before.timezone, slack_id: before.slack_id, tier1_id: before.tier1_id, tier2_id: before.tier2_id },
-      after: { name: u.name, email: u.email, role: u.role, tier, tier1_id: u.tier1Id, tier2_id: u.tier2Id, active, timezone: u.timezone, slack_id: u.slackId },
+      before: { name: before.name, email: before.email, role: before.role, finance_viewer: before.finance_viewer, tier: before.tier, active: before.active, timezone: before.timezone, slack_id: before.slack_id, tier1_id: before.tier1_id, tier2_id: before.tier2_id },
+      after: { name: u.name, email: u.email, role: u.role, finance_viewer: u.financeViewer, tier, tier1_id: u.tier1Id, tier2_id: u.tier2Id, active, timezone: u.timezone, slack_id: u.slackId },
       passwordChanged: !!u.password,
     });
     flash(req, 'success', `Saved ${u.name}.`);
