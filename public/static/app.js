@@ -340,4 +340,48 @@
       }
     });
   }
+
+  // Every file input also accepts a dropped file: drop onto the input's field (label, hint and all).
+  var fileInputs = document.querySelectorAll('input[type=file]');
+  Array.prototype.forEach.call(fileInputs, function (fi) {
+    var zone = fi.closest('.field') || fi;
+    var allowed = (fi.getAttribute('accept') || '')
+      .split(',')
+      .map(function (t) { return t.trim().toLowerCase(); })
+      .filter(Boolean);
+    var okType = function (f) {
+      if (!allowed.length) return true;
+      var name = f.name.toLowerCase();
+      var mime = (f.type || '').toLowerCase();
+      return allowed.some(function (t) {
+        return t.charAt(0) === '.' ? name.slice(-t.length) === t : t.slice(-2) === '/*' ? mime.indexOf(t.slice(0, -1)) === 0 : mime === t;
+      });
+    };
+    var hasFiles = function (e) {
+      return e.dataTransfer && Array.prototype.indexOf.call(e.dataTransfer.types || [], 'Files') !== -1;
+    };
+    zone.addEventListener('dragover', function (e) {
+      if (!hasFiles(e)) return;
+      e.preventDefault();
+      zone.classList.add('drop-over');
+    });
+    zone.addEventListener('dragleave', function (e) {
+      if (!zone.contains(e.relatedTarget)) zone.classList.remove('drop-over');
+    });
+    zone.addEventListener('drop', function (e) {
+      if (!hasFiles(e)) return;
+      e.preventDefault();
+      zone.classList.remove('drop-over');
+      var dropped = Array.prototype.filter.call(e.dataTransfer.files, okType);
+      if (!fi.multiple) dropped = dropped.slice(0, 1);
+      if (!dropped.length) {
+        window.alert('That file type is not accepted here.');
+        return;
+      }
+      var dt = new DataTransfer();
+      dropped.forEach(function (f) { dt.items.add(f); });
+      fi.files = dt.files;
+      fi.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+  });
 })();

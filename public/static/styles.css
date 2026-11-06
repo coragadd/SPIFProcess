@@ -236,3 +236,6 @@ td .link.rep-remove { color: var(--red); }
 
 details { margin: 0.5rem 0; }
 summary { cursor: pointer; font-weight: 500; color: var(--navy); }
+
+/* Drop a file anywhere on a file field */
+.field.drop-over { outline: 2px dashed var(--plum); outline-offset: 4px; border-radius: 8px; background: var(--plum-soft); }
