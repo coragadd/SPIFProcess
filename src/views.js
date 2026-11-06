@@ -278,7 +278,7 @@ function requestForm(ctx, o) {
     : '';
 
   const common = `
-    ${input('name', 'Name', values, errors, { readonly: lockName, hint: lockName ? 'Saved recurring SPIF name.' : 'Must be distinct from every other request.' })}
+    ${input('name', 'Name', values, errors, { readonly: lockName, tip: lockName ? 'Saved recurring SPIF name.' : 'Must be distinct from every other request.' })}
     ${participantsFields(values, errors, isAdj ? 'Person or team receiving the adjustment' : 'People or team involved')}
     ${textarea('description', isAdj ? 'Description' : 'Detailed description of how it works', values, errors, {
       rows: 6,
@@ -324,20 +324,20 @@ function requestForm(ctx, o) {
       ${input('payout_rate', 'Rate ($ per unit of the KPI)', values, errors, { type: 'number', step: '0.01', hint: 'e.g. 20 for $20 per demo.' })}`
     )}
     ${select('calculated_by', 'Who will calculate the payout amounts?', values, errors, Object.entries(CALCULATOR_LABELS), {
-      hint: 'If you calculate them, you enter the winners and payout amounts later in Manage Incentives.',
+      tip: 'If you calculate them, you enter the winners and payout amounts later in Manage Incentives.',
     })}
     ${input('estimated_spend', 'Estimated total spend ($)', values, errors, { type: 'number', step: '0.01' })}
     <div class="row">
       ${input('start_date', 'Start date', values, errors, {
         type: 'date',
         min: firstOfNextMonth(todayIn(ctx.user.timezone || 'America/New_York')),
-        tip: 'The current month is blocked. The earliest start date is the 1st of next month.',
+        hint: 'The current month is blocked. The earliest start date is the 1st of next month.',
       })}
       ${input('end_date', 'End date', values, errors, { type: 'date', hint: 'Required. Must be in the same month as the start date.' })}
     </div>
     <div class="row">
       ${input('announce_date', 'Date announced to the team', values, errors, { type: 'date' })}
-      ${input('announce_method', 'How it will be announced', values, errors, { hint: 'e.g. email, all-hands, Slack' })}
+      ${input('announce_method', 'How it will be announced', values, errors, { tip: 'e.g. email, all-hands, Slack' })}
     </div>
     ${textarea('eligibility', 'Eligibility and measurement rules', values, errors, { hint: 'Required. Who qualifies and exactly how the payout is earned and measured.' })}
     ${supportingDocFields(values, errors, existingFiles, keptIds)}
