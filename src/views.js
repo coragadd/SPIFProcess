@@ -65,9 +65,6 @@ const LOGO = `<svg class="logo" viewBox="0 0 32 32" width="26" height="26" aria-
 // A small "?" that shows its text on hover or keyboard focus.
 const tipHtml = (text) => `<button type="button" class="tip" data-tip="${esc(text)}" aria-label="${esc(text)}">?</button>`;
 
-const ADJUSTMENT_GUIDE =
-  'Adjustment guide: adjustments are treated as expenses by default.';
-
 function csrfField(ctx) {
   return `<input type="hidden" name="_csrf" value="${esc(ctx.csrf)}">`;
 }
@@ -286,7 +283,6 @@ function requestForm(ctx, o) {
     })}`;
 
   const adjFields = `
-    <div class="flash info">${esc(ADJUSTMENT_GUIDE)}</div>
     ${input('deal', 'Deal or component (optional)', values, errors, { hint: 'Leave blank if the adjustment is not tied to a specific deal or component.' })}
     ${textarea('adjustment_reason', 'Reason for the adjustment', values, errors)}
     ${input('amounts', 'Payout amount', values, errors, { hint: 'e.g. $450 commission adjustment' })}`;
@@ -573,7 +569,6 @@ function requestDetail(ctx, o) {
     decisionForms.push(`<form method="post" action="/requests/${r.id}/finance" class="panel">${csrfField(ctx)}
       <h3>Finance review</h3>
       ${adminNote}
-      ${isAdj ? `<div class="flash info">${esc(ADJUSTMENT_GUIDE)}</div>` : ''}
       <div class="field"><label>Classification</label>
         <select name="classification">
           <option value="">Select...</option>
@@ -603,7 +598,6 @@ function requestDetail(ctx, o) {
     decisionForms.push(`<form method="post" action="/requests/${r.id}/approver" class="panel">${csrfField(ctx)}
       <h3>Approver decision</h3>
       ${adminNote}
-      ${isAdj ? `<div class="flash info">${esc(ADJUSTMENT_GUIDE)}</div>` : ''}
       ${reasoningBox(false)}
       <button class="btn" name="action" value="approve_once">Approve once (this month only)</button>
       ${isAdj ? '' : `<button class="btn" name="action" value="approve_quarter">Approve through the end of the quarter (${esc(dateLabel(actions.quarterEnd))})</button>`}
@@ -685,7 +679,6 @@ function requestDetail(ctx, o) {
     ${r.approval_scope ? `Approval: <strong>${esc(scopeLabel(r))}</strong>.` : ''}
     ${decidedLine ? `<br>${decidedLine}` : ''}</p>
     ${r.finance_concern ? `<div class="flash warn"><strong>Finance concern:</strong> <span class="pre">${esc(r.finance_concern)}</span></div>` : ''}
-    ${isAdj ? `<div class="flash info">${esc(ADJUSTMENT_GUIDE)}</div>` : ''}
     <h2>Current terms</h2>
     ${termsTable(data, r.type, filesFor(r.current_version))}
     ${decisionForms.join('')}
