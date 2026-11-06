@@ -183,12 +183,126 @@
     });
     repBody.addEventListener('input', updateTotal);
 
+    // CSV import: parse and check the whole file first, then load it into the table for review.
+    // Nothing is saved until the form is submitted, and a file with any problem loads nothing.
+    var csvInput = document.getElementById('amounts_csv');
+    var csvErrors = document.getElementById('csv-errors');
+    var parseCsv = function (text) {
+      var rows = [], row = [], cell = '', quoted = false, src = text.replace(/^﻿/, '');
+      for (var i = 0; i < src.length; i++) {
+        var c = src[i];
+        if (quoted) {
+          if (c === '"' && src[i + 1] === '"') { cell += '"'; i++; }
+          else if (c === '"') quoted = false;
+          else cell += c;
+        } else if (c === '"') quoted = true;
+        else if (c === ',') { row.push(cell); cell = ''; }
+        else if (c === '\n' || c === '\r') {
+          if (c === '\r' && src[i + 1] === '\n') i++;
+          row.push(cell); rows.push(row); row = []; cell = '';
+        } else cell += c;
+      }
+      if (cell || row.length) { row.push(cell); rows.push(row); }
+      return rows;
+    };
+    var showCsvErrors = function (list) {
+      csvErrors.innerHTML = '';
+      var p = document.createElement('p');
+      p.className = 'err';
+      p.textContent = 'Nothing was loaded. Fix these and choose the file again:';
+      var ul = document.createElement('ul');
+      ul.className = 'err';
+      for (var i = 0; i < list.length; i++) {
+        var li = document.createElement('li');
+        li.textContent = list[i];
+        ul.appendChild(li);
+      }
+      csvErrors.appendChild(p);
+      csvErrors.appendChild(ul);
+      csvErrors.hidden = false;
+    };
+    if (csvInput) {
+      csvInput.addEventListener('change', function () {
+        csvErrors.hidden = true;
+        var file = csvInput.files[0];
+        if (!file) return;
+        if (!/\.csv$/i.test(file.name)) {
+          showCsvErrors(['Choose a .csv file. Use the template download if you need a starting point.']);
+          csvInput.value = '';
+          return;
+        }
+        var reader = new FileReader();
+        reader.onload = function () {
+          var names = {};
+          var opts = repTemplate.content.querySelectorAll('option');
+          for (var o = 0; o < opts.length; o++) if (opts[o].value) names[opts[o].value.toLowerCase()] = opts[o].value;
+          var grid = parseCsv(String(reader.result)).filter(function (r) {
+            return r.some(function (c) { return c.trim() !== ''; });
+          });
+          var errors = [];
+          var head = (grid[0] || []).map(function (h) { return h.trim().toLowerCase(); });
+          var ci = head.indexOf('rep');
+          var ai = head.indexOf('amount');
+          var ni = head.indexOf('note');
+          if (ci === -1 || ai === -1) {
+            showCsvErrors(['The first row must be a header with "Rep" and "Amount" columns (and optionally "Note"). Download the template to start.']);
+            csvInput.value = '';
+            return;
+          }
+          var parsed = [];
+          var seen = {};
+          for (var r = 1; r < grid.length; r++) {
+            var line = r + 1; // header is line 1
+            var rawName = (grid[r][ci] || '').trim();
+            var rawAmount = (grid[r][ai] || '').trim();
+            var note = ni === -1 ? '' : (grid[r][ni] || '').trim();
+            var name = names[rawName.toLowerCase()];
+            if (!rawName) errors.push('Line ' + line + ': the Rep is blank.');
+            else if (!name) errors.push('Line ' + line + ': "' + rawName + '" is not on the rep list.');
+            else if (seen[name]) errors.push('Line ' + line + ': ' + name + ' is listed more than once (also on line ' + seen[name] + ').');
+            else seen[name] = line;
+            var cleaned = rawAmount.replace(/[$,\s]/g, '');
+            if (!rawAmount) errors.push('Line ' + line + ': the Amount is blank' + (name ? ' for ' + name : '') + '.');
+            else if (!/^\d+(\.\d+)?$/.test(cleaned)) errors.push('Line ' + line + ': "' + rawAmount + '" is not a number of 0 or more' + (name ? ' (' + name + ')' : '') + '.');
+            parsed.push({ name: name, amount: cleaned, note: note });
+          }
+          if (!parsed.length) errors.push('The file has a header but no reps.');
+          if (errors.length) {
+            showCsvErrors(errors);
+            csvInput.value = '';
+            return;
+          }
+          var current = 0;
+          var selects = repBody.querySelectorAll('select');
+          for (var s = 0; s < selects.length; s++) if (selects[s].value) current++;
+          if (current && !window.confirm('This replaces the ' + current + ' rep row(s) now in the table with the ' + parsed.length + ' from the file. Nothing is saved until you press Save. Replace them?')) {
+            csvInput.value = '';
+            return;
+          }
+          repBody.innerHTML = '';
+          for (var k = 0; k < parsed.length; k++) {
+            repBody.appendChild(repTemplate.content.cloneNode(true));
+            var tr = repBody.lastElementChild;
+            tr.querySelector('select').value = parsed[k].name;
+            tr.querySelector('[name=rep_amount]').value = parsed[k].amount;
+            tr.querySelector('[name=rep_note]').value = parsed[k].note;
+          }
+          updateTotal();
+          csvInput.value = '';
+          repError.hidden = true;
+          csvErrors.innerHTML = '<p class="csv-ok"></p>';
+          csvErrors.firstChild.textContent = 'Loaded ' + parsed.length + ' rep(s) from ' + file.name + '. Review the table, then press Save rep amounts.';
+          csvErrors.hidden = false;
+        };
+        reader.readAsText(file);
+      });
+    }
+
     repForm.addEventListener('submit', function (e) {
       var seen = {};
       var message = '';
       // A submitter who calculates their own amounts must attach proof of the calculations.
       var proof = document.getElementById('justification_files');
-      var sheet = document.getElementById('amounts_file');
       var typedRows = false;
       var rowSelects = repBody.querySelectorAll('select');
       for (var t = 0; t < rowSelects.length; t++) if (rowSelects[t].value) typedRows = true;
@@ -197,7 +311,7 @@
         repForm.getAttribute('data-needs-proof') === '1' &&
         repForm.getAttribute('data-has-proof') !== '1' &&
         !proof.files.length &&
-        (typedRows || (sheet && sheet.files.length))
+        typedRows
       ) {
         e.preventDefault();
         repError.textContent =

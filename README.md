@@ -6,7 +6,7 @@ Flow: submitter requests -> finance classifies (capitalizable or expense; financ
 
 Admins can do every step (classify, approve, skip) except on their own requests. Their decisions show as "(admin)" on the record and in the audit log, and Slack says an admin acted. Admins also have a read-only "View as" mode (Admin page) to see the app as another user. Reports are visible to admins, finance and Tier 1 only, and are marked "Coming soon".
 
-Payout amounts (Manage Incentives): amounts can be typed or loaded from an .xlsx/.csv (columns Rep, Amount, optional Note). When RevOps calculates, only an admin can enter or upload them. When the submitter calculates, they must also attach a screenshot or file showing their calculations.
+Payout amounts (Manage Incentives): amounts can be typed or imported from a CSV (columns Rep, Amount, optional Note; a template pre-filled with the reps already listed can be downloaded). The CSV is checked in the browser and loaded into the table for review, so nothing is saved until Save rep amounts. Any invalid row (unknown rep, blank or non-numeric amount, duplicate) rejects the whole file, and replacing rows already in the table asks first. When RevOps calculates, only an admin can enter or upload them. When the submitter calculates, they must also attach a screenshot or file showing their calculations.
 
 ## Scheduled Slack reminders
 
@@ -14,7 +14,7 @@ Payout amounts (Manage Incentives): amounts can be typed or loaded from an .xlsx
 
 ## Stack
 
-Node + Express, server-rendered pages, hosted on Vercel as a serverless function (`api/index.js` exports the app from `src/server.js`). Data lives in Turso (hosted SQLite, via `@libsql/client`). Uploaded documents (eligibility and measurement rules) are stored in the same database (`attachment_blobs`), linked to a request version, and counted as part of the approved terms. Vercel rejects request bodies over 4.5 MB, so attachments are limited to 4 MB in total per submission.
+Node + Express, server-rendered pages, hosted on Vercel as a serverless function (`api/index.js` exports the app from `src/server.js`). Data lives in Turso (hosted SQLite, via `@libsql/client`). Documents uploaded to SPIFs before the form moved to links (the supporting document is now an optional link; new uploads are refused) and proof of payout calculations are stored in the same database (`attachment_blobs`), linked to a request version, and counted as part of the approved terms. Vercel rejects request bodies over 4.5 MB, so attachments are limited to 4 MB in total per submission.
 
 ## Environment variables
 

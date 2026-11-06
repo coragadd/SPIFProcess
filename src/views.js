@@ -141,17 +141,19 @@ function select(name, label, values, errors, options, o) {
   return fieldWrap(name, label, opt.hint, errors, inner, opt.tip);
 }
 
-// The supporting document: a shareable SharePoint link (what marketing needs) and, optionally, files.
-function supportingDocFields(values, errors, existing, keptIds, reattach) {
-  return `${input('supporting_link', 'Link a supporting document', values, errors, {
+// The supporting document: an optional shareable SharePoint link (what marketing needs). New file
+// uploads are no longer offered; files uploaded to earlier versions are still listed so they can be kept.
+function supportingDocFields(values, errors, existing, keptIds) {
+  return `${input('supporting_link', 'Link a supporting document (optional)', values, errors, {
     type: 'url',
     hint: 'Use a shareable SharePoint link (anyone at Quilt can view). Marketing needs access to it, so check the link opens without a request for permission.',
-  })}${fileField(existing, keptIds, reattach)}`;
+  })}${previousFiles(existing, keptIds)}`;
 }
 
-function fileField(existing, keptIds, reattach) {
+function previousFiles(existing, keptIds) {
+  if (!(existing || []).length) return '';
   const ids = keptIds || [];
-  const kept = (existing || [])
+  const kept = existing
     .map(
       (a) =>
         `<label class="check"><input type="checkbox" name="keep_files" value="${a.id}"${
@@ -160,12 +162,9 @@ function fileField(existing, keptIds, reattach) {
     )
     .join('<br>');
   return `<div class="field">
-    <label for="eligibility_files">Or attach a file (optional)</label>
-    ${kept ? `<div class="hint">Already attached. Uncheck to remove.</div><div>${kept}</div>` : ''}
-    <input id="eligibility_files" name="eligibility_files" type="file" multiple accept=".pdf,.doc,.docx,.xls,.xlsx,.csv,.txt,.png,.jpg,.jpeg">
-    <div class="hint">${
-      reattach ? 'The form had errors, so please attach your file(s) again. ' : ''
-    }PDF, Word, Excel, CSV, text or image. Up to 5 files, 10 MB each. It does not replace the eligibility and measurement rules above.</div>
+    <label>Files uploaded earlier</label>
+    <div>${kept}</div>
+    <div class="hint">These were uploaded before the form moved to links. They stay attached unless you uncheck them. New files can no longer be uploaded; use the link above.</div>
   </div>`;
 }
 
@@ -268,7 +267,7 @@ function requestChooser(ctx) {
 }
 
 function requestForm(ctx, o) {
-  const { type, values, errors, action, submitLabel, savedId, lockName, requestId, existingFiles, keptIds, reattach } = o;
+  const { type, values, errors, action, submitLabel, savedId, lockName, requestId, existingFiles, keptIds } = o;
   const isAdj = type === 'adjustment';
   const isMbo = type === 'mbo';
   const hidden = `${csrfField(ctx)}<input type="hidden" name="type" value="${esc(type)}">${
@@ -341,7 +340,7 @@ function requestForm(ctx, o) {
       ${input('announce_method', 'How it will be announced', values, errors, { hint: 'e.g. email, all-hands, Slack' })}
     </div>
     ${textarea('eligibility', 'Eligibility and measurement rules', values, errors, { hint: 'Required. Who qualifies and exactly how the payout is earned and measured.' })}
-    ${supportingDocFields(values, errors, existingFiles, keptIds, reattach)}
+    ${supportingDocFields(values, errors, existingFiles, keptIds)}
     ${textarea('edge_cases', 'Edge cases (optional)', values, errors, {
       hint: 'Think of one-off cases that may require exceptions, and say how each would be handled.',
     })}`;
@@ -535,10 +534,12 @@ function requestDetail(ctx, o) {
       <p><button type="button" class="btn secondary" id="rep-add">Add rep</button></p>
       <p id="rep-error" class="err" hidden></p>
       <p>Total: <strong id="rep-total">${esc(money(repTotal))}</strong></p>
-      <div class="field">
-        <label for="amounts_file">Or upload the amounts from a spreadsheet (optional)</label>
-        <input id="amounts_file" name="amounts_file" type="file" accept=".xlsx,.csv">
-        <div class="hint">An .xlsx or .csv file with a column for the rep's name, a column for the amount, and an optional note. Rep names must match the rep list. The uploaded rows replace the rows above when you save.</div>
+      <div class="field rep-import">
+        <label for="amounts_csv">Import amounts from a CSV (optional)</label>
+        <p class="hint"><a href="/requests/${r.id}/rep-amounts/template.csv">Download the CSV template</a>${repAmounts.length ? ' (filled in with the reps already listed)' : ''}. Columns: Rep, Amount, Note. Rep must match a name on the rep list exactly.</p>
+        <input id="amounts_csv" type="file" accept=".csv,text/csv">
+        <p class="hint">The file is checked first and loaded into the table above for you to review. Nothing is saved until you press Save rep amounts. If any row has a problem, nothing is loaded.</p>
+        <div id="csv-errors" class="csv-errors" hidden></div>
       </div>
       ${revOpsCalcs && !isAdminUser ? '' : proofFields}
       <button class="btn">Save rep amounts</button>

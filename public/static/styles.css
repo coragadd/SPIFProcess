@@ -184,6 +184,24 @@ table.grid tr.user-edit .panel { border: 0; padding: 0; margin: 0; }
 .users-grid { display: block; overflow-x: auto; }
 td .link.rep-remove { color: var(--red); }
 
+/* Manage Incentives: the rep table sits in a panel, not a .field, so style its controls here */
+#rep-form { color: var(--text); font-size: 14px; }
+#rep-form > .hint { font-size: 13px; line-height: 1.5; margin: 0 0 1rem; }
+#rep-form table.list td { vertical-align: middle; }
+#rep-form table.list input, #rep-form table.list select {
+  width: 100%; min-width: 120px; padding: 0.45rem 0.65rem; border: 1px solid var(--border); border-radius: 8px;
+  font: inherit; font-size: 14px; color: var(--text); background: #fff;
+}
+#rep-form table.list input:focus, #rep-form table.list select:focus { outline: none; border-color: var(--plum); box-shadow: 0 0 0 3px var(--plum-soft); }
+#rep-form table.list td:nth-child(2) { width: 160px; }
+#rep-form table.list td:last-child { width: 1%; white-space: nowrap; }
+#rep-form .field { margin-top: 1rem; }
+#rep-form .rep-import { border-top: 1px solid var(--line); padding-top: 1rem; }
+#rep-form .rep-import .hint { font-size: 13px; margin: 0 0 0.5rem; }
+.csv-errors ul { margin: 0.25rem 0 0; padding-left: 1.25rem; font-size: 13px; }
+.csv-errors p.err { font-size: 13px; font-weight: 600; margin: 0.5rem 0 0; }
+.csv-errors p.csv-ok { margin: 0.5rem 0 0; font-size: 13px; color: #1f6a2b; }
+
 .banner { display: block; background: var(--plum-soft); border: 1px solid var(--border); padding: 0.7rem 1rem; border-radius: 8px; margin-bottom: 1.25rem; text-decoration: none; color: var(--navy); }
 
 /* Status pills: white text on the status colour */

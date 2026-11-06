@@ -136,15 +136,13 @@ const ALLOWED_EXT = ['.pdf', '.doc', '.docx', '.xls', '.xlsx', '.csv', '.txt', '
 const MAX_TOTAL_BYTES = 4 * 1024 * 1024;
 const MAX_FILES = 5;
 
+// The request forms no longer accept uploaded files (the supporting document is an optional link).
+// They are still multipart so earlier markup keeps working, but any file part is refused.
 const uploader = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: MAX_TOTAL_BYTES, files: MAX_FILES },
-  fileFilter: (req, file, cb) => {
-    const ext = path.extname(file.originalname || '').toLowerCase();
-    if (!ALLOWED_EXT.includes(ext)) return cb(new UserError(`"${file.originalname}" is not an allowed file type.`));
-    cb(null, true);
-  },
-}).array('eligibility_files', MAX_FILES);
+  fileFilter: (req, file, cb) => cb(new UserError('Files can no longer be uploaded here. Link the supporting document instead.')),
+}).none();
 
 // Rep amounts form: an optional spreadsheet of amounts plus proof of the submitter's calculations.
 const amountsUploader = multer({
@@ -197,8 +195,8 @@ function parseUpload(mw, req, res, next) {
 
 // The file bytes ride along in `data`; workflow.saveAttachments stores them inside the same
 // transaction as the request, so a failed submission leaves nothing behind.
-function uploadedRecords(req) {
-  return recordsOf(req.files || []);
+function uploadedRecords() {
+  return []; // new request forms take a link, not files
 }
 
 function recordsOf(files) {
@@ -513,7 +511,6 @@ app.post(
             lockName: !!saved,
             existingFiles: existing,
             keptIds: kept.map((a) => String(a.id)),
-            reattach: uploaded.length > 0,
           })
         )
       );
@@ -635,7 +632,6 @@ app.post(
             requestId: r.id,
             existingFiles: existing,
             keptIds: kept.map((a) => String(a.id)),
-            reattach: uploaded.length > 0,
           })
         )
       );
@@ -687,6 +683,30 @@ actionRoute('approver', wf.approverDecide, 'Approver decision recorded.', notify
 actionRoute('skip', wf.adminSkip, 'Step skipped and logged.', notifyActor);
 actionRoute('cancel', wf.cancelRequest, 'Request cancelled.');
 actionRoute('results', wf.submitResults, 'Results submitted. The request is finalized.');
+
+// A CSV template for the rep amounts: Rep, Amount, Note, filled in with the reps already on the incentive.
+function csvCell(v) {
+  let t = v == null ? '' : String(v);
+  if (/^[=+\-@\t\r]/.test(t)) t = "'" + t; // keep spreadsheet programs from running text as a formula
+  return /[",\r\n]/.test(t) ? '"' + t.replace(/"/g, '""') + '"' : t;
+}
+
+app.get(
+  '/requests/:id/rep-amounts/template.csv',
+  wrap(async (req, res) => {
+    const r = await loadVisible(req, res);
+    if (!r) return;
+    if (!(await wf.canEditRepAmounts(req.user, r))) throw new UserError('You cannot change the rep amounts on this request.');
+    const lines = [['Rep', 'Amount', 'Note']].concat(
+      (await wf.getRepAmounts(r.id)).map((x) => [x.rep_name, x.amount, x.note || ''])
+    );
+    res.set({
+      'Content-Type': 'text/csv; charset=utf-8',
+      'Content-Disposition': `attachment; filename="rep-amounts-template-${r.id}.csv"`,
+    });
+    res.send('﻿' + lines.map((l) => l.map(csvCell).join(',')).join('\r\n') + '\r\n');
+  })
+);
 
 // Rep amounts: typed in the table, or loaded from a spreadsheet (which replaces the table). A
 // submitter who calculates their own amounts must attach proof of the calculations.
