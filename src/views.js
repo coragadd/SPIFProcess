@@ -935,6 +935,7 @@ function admin(ctx, o) {
       </div>
       <button class="btn">Save ${esc(u.name)}</button>
       <button type="button" class="btn secondary user-cancel">Close</button>
+      ${u.id === ctx.user.id ? '' : `<button class="btn danger" formaction="/admin/users/${u.id}/delete" formnovalidate data-confirm="Delete ${esc(u.name)}? This cannot be undone. Users with any history cannot be deleted; set them to Inactive instead.">Delete user</button>`}
       </form></td></tr>`
       )
       .join('')}

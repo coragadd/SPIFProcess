@@ -1035,6 +1035,47 @@ app.post(
   })
 );
 
+// Delete a user. Only someone with no history can be deleted: requests, approvals, uploads,
+// results, rep amounts and saved SPIFs all point at the user, and request pages join on the
+// submitter, so removing them would hide records. Everyone else is deactivated instead.
+// The audit log keeps the user's name on each row, so it is unaffected.
+const USER_REFERENCES = [
+  ['requests they submitted', 'SELECT COUNT(*) AS n FROM requests WHERE submitter_id = ?'],
+  ['request versions they created', 'SELECT COUNT(*) AS n FROM request_versions WHERE created_by = ?'],
+  ['approval decisions', 'SELECT COUNT(*) AS n FROM approval_steps WHERE decided_by = ?'],
+  ['uploaded files', 'SELECT COUNT(*) AS n FROM attachments WHERE uploaded_by = ?'],
+  ['results they submitted', 'SELECT COUNT(*) AS n FROM results WHERE submitted_by = ?'],
+  ['rep amounts they entered', 'SELECT COUNT(*) AS n FROM rep_amounts WHERE updated_by = ?'],
+  ['saved SPIFs they own or approved', 'SELECT COUNT(*) AS n FROM saved_spifs WHERE owner_id = ? OR approved_by = ?'],
+  ['users who report to them', 'SELECT COUNT(*) AS n FROM users WHERE tier1_id = ? OR tier2_id = ?'],
+];
+
+app.post(
+  '/admin/users/:id/delete',
+  requireRole('admin'),
+  wrap(async (req, res) => {
+    const id = Number(req.params.id);
+    const u = Number.isInteger(id) ? await db.prepare('SELECT * FROM users WHERE id = ?').get(id) : null;
+    if (!u) return notFound(res);
+    if (id === req.realUser.id) throw new UserError('You cannot delete yourself.');
+    const found = [];
+    for (const [label, sql] of USER_REFERENCES) {
+      const args = sql.split('?').slice(1).map(() => id);
+      const { n } = await db.prepare(sql).get(...args);
+      if (n) found.push(`${label}: ${n}`);
+    }
+    if (found.length) {
+      throw new UserError(
+        `${u.name} cannot be deleted because they have history (${found.join(', ')}). Set their status to Inactive instead, which blocks sign-in and keeps the records intact.`
+      );
+    }
+    await db.prepare('DELETE FROM users WHERE id = ?').run(id);
+    await audit(req.user, 'user.deleted', 'user', id, null, { name: u.name, email: u.email, role: u.role, tier: u.tier });
+    flash(req, 'success', `Deleted ${u.name}.`);
+    res.redirect('/admin');
+  })
+);
+
 // ---------------------------------------------------------------- fallbacks
 
 app.use((req, res) => notFound(res));

@@ -341,6 +341,12 @@
     });
   }
 
+  // Buttons with data-confirm ask before submitting (for example, Delete user).
+  document.addEventListener('click', function (e) {
+    var b = e.target.closest && e.target.closest('[data-confirm]');
+    if (b && !window.confirm(b.getAttribute('data-confirm'))) e.preventDefault();
+  });
+
   // Every file input also accepts a dropped file: drop onto the input's field (label, hint and all).
   var fileInputs = document.querySelectorAll('input[type=file]');
   Array.prototype.forEach.call(fileInputs, function (fi) {
