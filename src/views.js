@@ -238,7 +238,7 @@ function home(ctx, pendingCount) {
     <p class="subtitle">What would you like to do?</p>
     ${banner}
     <nav class="options">
-      <a class="card" href="/request"><h2>Request an Incentive</h2><p>Submit a new SPIF, recurring SPIF, bonus, or adjustment.</p></a>
+      <a class="card" href="/request"><h2>Request an Incentive</h2><p>${u.role === 'submitter' && u.tier === 3 ? 'Submit a new SPIF or a recurring SPIF.' : 'Submit a new SPIF, recurring SPIF, bonus, or adjustment.'}</p></a>
       <a class="card" href="/requests"><h2>Manage an Incentive</h2><p>Track, review, approve, and report results on requests.</p></a>
       ${canSeeReports(u) ? '<a class="card" href="/reports"><h2>View Reports <span class="pill soon">Coming soon</span></h2><p>Spend by submitter, SPIF, and month.</p></a>' : ''}
     </nav>
@@ -247,6 +247,8 @@ function home(ctx, pendingCount) {
 }
 
 function requestChooser(ctx) {
+  // Tier 3 users can request SPIFs only: no bonuses, MBOs or adjustments.
+  const t3 = ctx.user.role === 'submitter' && ctx.user.tier === 3;
   return page(
     ctx,
     'Request an Incentive',
@@ -256,9 +258,9 @@ function requestChooser(ctx) {
     <nav class="options">
       <a class="card" href="/requests/new?type=new_spif"><h2>New SPIF</h2><p>A SPIF that has not run before.</p></a>
       <a class="card" href="/saved"><h2>Recurring SPIF</h2><p>Pick a saved SPIF and resubmit it with new dates.</p></a>
-      <a class="card" href="/requests/new?type=bonus"><h2>Bonus</h2><p>A regular bonus. It goes through finance and approval.</p></a>
+      ${t3 ? '' : `<a class="card" href="/requests/new?type=bonus"><h2>Bonus</h2><p>A regular bonus. It goes through finance and approval.</p></a>
       <a class="card" href="/requests/new?type=mbo"><h2>MBO</h2><p>One rep and one amount. No approval needed.</p></a>
-      <a class="card" href="/requests/new?type=adjustment"><h2>Adjustment</h2><p>A commission adjustment, on a deal, a component, or neither.</p></a>
+      <a class="card" href="/requests/new?type=adjustment"><h2>Adjustment</h2><p>A commission adjustment, on a deal, a component, or neither.</p></a>`}
     </nav>`
   );
 }

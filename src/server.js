@@ -437,11 +437,15 @@ app.get('/request', (req, res) => res.send(views.requestChooser(ctx(req))));
 
 const NEW_TYPES = ['new_spif', 'recurring_spif', 'bonus', 'mbo', 'adjustment'];
 
+// Tier 3 users can request SPIFs only.
+const T3_BLOCKED = ['bonus', 'mbo', 'adjustment'];
+const isTier3 = (u) => u.role === 'submitter' && u.tier === 3;
+
 app.get(
   '/requests/new',
   wrap(async (req, res) => {
     const type = String(req.query.type || '');
-    if (!NEW_TYPES.includes(type)) return res.redirect('/request');
+    if (!NEW_TYPES.includes(type) || (isTier3(req.user) && T3_BLOCKED.includes(type))) return res.redirect('/request');
     let values = {};
     let savedId = null;
     let lockName = false;
@@ -484,6 +488,7 @@ app.post(
   wrap(async (req, res) => {
     const type = String(req.body.type || '');
     if (!NEW_TYPES.includes(type)) throw new UserError('Unknown request type.');
+    if (isTier3(req.user) && T3_BLOCKED.includes(type)) throw new UserError('Tier 3 users can request SPIFs only.');
     let saved = null;
     let existing = [];
     if (type === 'recurring_spif') {
