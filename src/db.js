@@ -217,6 +217,27 @@ CREATE TABLE IF NOT EXISTS reps (
   active INTEGER NOT NULL DEFAULT 1
 );
 
+-- Who owes MBOs for a month (admin-managed). Submitted when the person has submitted mbos_needed MBOs
+-- for that month in the portal, or when an admin marked it by hand. The *_at columns record when each
+-- Slack reminder went out (UTC); a single-reminder entry uses reminder1_sent_at only.
+CREATE TABLE IF NOT EXISTS mbo_expectations (
+  id INTEGER PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id),
+  month TEXT NOT NULL,
+  due_date TEXT NOT NULL,
+  mbos_needed INTEGER NOT NULL DEFAULT 1,
+  manual_submitted INTEGER NOT NULL DEFAULT 0,
+  single_reminder INTEGER NOT NULL DEFAULT 0,
+  single_reminder_date TEXT,
+  reminder1_sent_at TEXT,
+  reminder2_sent_at TEXT,
+  manual_reminder_at TEXT,
+  created_by INTEGER REFERENCES users(id),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (user_id, month)
+);
+CREATE INDEX IF NOT EXISTS idx_mbo_expectations_month ON mbo_expectations(month);
+
 CREATE TABLE IF NOT EXISTS audit_log (
   id INTEGER PRIMARY KEY,
   ts TEXT NOT NULL DEFAULT (datetime('now')),

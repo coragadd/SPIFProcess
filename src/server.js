@@ -13,6 +13,8 @@ const sso = require('./sso');
 const { notifyRequest, notifyRepAmounts } = require('./notify');
 const { parseAmountsFile } = require('./amountsFile');
 const { runReminders } = require('./reminders');
+const mbos = require('./mbos');
+const { runMboReminders } = mbos;
 
 const { UserError } = wf;
 
@@ -262,13 +264,16 @@ app.get(
     if (!process.env.CRON_SECRET || sent.length !== want.length || !crypto.timingSafeEqual(Buffer.from(sent), Buffer.from(want))) {
       return res.status(401).send('Unauthorized.');
     }
-    res.json(
-      await runReminders(req, {
+    const today = /^\d{4}-\d{2}-\d{2}$/.test(req.query.today || '') ? req.query.today : undefined;
+    const dry = req.query.dry === '1';
+    res.json({
+      ...(await runReminders(req, {
         force: ['first', 'third'].includes(req.query.force) ? req.query.force : undefined,
-        today: /^\d{4}-\d{2}-\d{2}$/.test(req.query.today || '') ? req.query.today : undefined,
-        dry: req.query.dry === '1',
-      })
-    );
+        today,
+        dry,
+      })),
+      mbo: await runMboReminders(req, { today, dry }),
+    });
   })
 );
 
@@ -1078,6 +1083,84 @@ app.post(
     await audit(req.user, 'user.deleted', 'user', id, null, { name: u.name, email: u.email, role: u.role, tier: u.tier });
     flash(req, 'success', `Deleted ${u.name}.`);
     res.redirect('/admin');
+  })
+);
+
+// ---------------------------------------------------------------- MBO reminders (admin only)
+
+const mboMonth = (v, fallback) => (mbos.validMonth(String(v || '')) ? String(v) : fallback);
+const mboBack = (res, month) => res.redirect('/admin/mbos?month=' + encodeURIComponent(month));
+
+app.get(
+  '/admin/mbos',
+  requireRole('admin'),
+  wrap(async (req, res) => {
+    const today = wf.todayIn(req.user.timezone);
+    const month = mboMonth(req.query.month, today.slice(0, 7));
+    res.send(
+      views.mboPage(ctx(req), {
+        month,
+        currentMonth: today.slice(0, 7),
+        entries: await mbos.listForMonth(month),
+        users: await db.prepare('SELECT id, name FROM users WHERE active = 1 ORDER BY name').all(),
+        secondDays: mbos.secondReminderDays(),
+      })
+    );
+  })
+);
+
+app.post(
+  '/admin/mbos',
+  requireRole('admin'),
+  wrap(async (req, res) => {
+    const { added, skipped } = await mbos.createEntries(req.user, req.body);
+    flash(
+      req,
+      'success',
+      `Added ${added} ${added === 1 ? 'person' : 'people'}.` + (skipped.length ? ` Already on this month's list: ${skipped.join(', ')}.` : '')
+    );
+    mboBack(res, mboMonth(req.body.month, ''));
+  })
+);
+
+app.post(
+  '/admin/mbos/:id',
+  requireRole('admin'),
+  wrap(async (req, res) => {
+    const e = await mbos.updateEntry(req.user, Number(req.params.id), req.body);
+    flash(req, 'success', `Saved ${e.user_name}'s entry.`);
+    mboBack(res, e.month);
+  })
+);
+
+app.post(
+  '/admin/mbos/:id/mark',
+  requireRole('admin'),
+  wrap(async (req, res) => {
+    const submitted = req.body.submitted === '1';
+    const e = await mbos.setManualSubmitted(req.user, Number(req.params.id), submitted);
+    flash(req, 'success', `${e.user_name} marked ${submitted ? 'Submitted' : 'Owed'} by hand.`);
+    mboBack(res, e.month);
+  })
+);
+
+app.post(
+  '/admin/mbos/:id/remind',
+  requireRole('admin'),
+  wrap(async (req, res) => {
+    const e = await mbos.sendNow(req, req.user, Number(req.params.id));
+    flash(req, 'success', `Reminder sent to ${e.user_name}.`);
+    mboBack(res, e.month);
+  })
+);
+
+app.post(
+  '/admin/mbos/:id/delete',
+  requireRole('admin'),
+  wrap(async (req, res) => {
+    const e = await mbos.deleteEntry(req.user, Number(req.params.id));
+    flash(req, 'success', `Removed ${e.user_name} from ${e.month}.`);
+    mboBack(res, e.month);
   })
 );
 

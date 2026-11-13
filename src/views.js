@@ -858,6 +858,8 @@ function admin(ctx, o) {
     `<a class="back" href="/">&larr; Home</a>
     <h1>Admin</h1>
 
+    <p><a href="/admin/mbos">MBO reminders</a> (who owes an MBO this month, and Slack reminders)</p>
+
     <h2 id="view-as">View as</h2>
     <form method="post" action="/view-as" class="panel">
       ${csrfField(ctx)}
@@ -949,6 +951,90 @@ function admin(ctx, o) {
   );
 }
 
+// Admin only: who owes an MBO for a month, reminder status, and the controls.
+function mboPage(ctx, o) {
+  const { month, currentMonth, entries, users, secondDays } = o;
+  const tz = ctx.user.timezone;
+  const label = `${dateLabel(month + '-01').split(' ')[0]} ${month.slice(0, 4)}`;
+  const owed = entries.filter((e) => !e.submitted).length;
+  const onList = new Set(entries.map((e) => e.user_id));
+  const post = (e, path, extra, btn, cls, confirm) =>
+    `<form method="post" action="/admin/mbos/${e.id}${path}" class="inline">${csrfField(ctx)}${extra || ''}<button class="${cls || 'chip'}"${confirm ? ` data-confirm="${esc(confirm)}"` : ''}>${btn}</button></form>`;
+  const rows = entries
+    .map((e) => {
+      const sent = [
+        e.reminder1_sent_at && `${e.single_reminder ? 'Single' : 'First'}: ${fmtTs(e.reminder1_sent_at, tz)}`,
+        e.reminder2_sent_at && `Second: ${fmtTs(e.reminder2_sent_at, tz)}`,
+        e.manual_reminder_at && `Sent now: ${fmtTs(e.manual_reminder_at, tz)}`,
+      ].filter(Boolean);
+      const source = e.manual_submitted ? ' (marked by hand)' : '';
+      return `<tr>
+        <td>${esc(e.user_name)}${e.user_active ? '' : ' <span class="muted">(inactive)</span>'}</td>
+        <td>${esc(label)}</td>
+        <td>${esc(dateLabel(e.due_date))}, ${esc(e.due_date.slice(0, 4))}</td>
+        <td><span class="pill ${e.submitted ? 's-approved' : 's-returned'}">${e.submitted ? 'Submitted' : 'Owed'}</span>
+          <div class="hint">${e.submitted_count} of ${e.mbos_needed} in the portal${esc(source)}</div></td>
+        <td>${esc(e.reminderStatus)}${e.single_reminder && e.single_reminder_date ? ` <span class="hint">(single, on ${esc(dateLabel(e.single_reminder_date))})</span>` : ''}
+          ${sent.map((s) => `<div class="hint">${esc(s)}</div>`).join('')}</td>
+        <td>${e.submitted ? '' : post(e, '/remind', '', 'Send reminder now', 'chip')}
+          ${post(e, '/mark', `<input type="hidden" name="submitted" value="${e.manual_submitted ? 0 : 1}">`, e.manual_submitted ? 'Mark Owed' : 'Mark Submitted')}</td>
+      </tr>
+      <tr><td colspan="6"><details><summary>Edit ${esc(e.user_name)}</summary>
+        <form method="post" action="/admin/mbos/${e.id}" class="panel">${csrfField(ctx)}
+          <div class="row">
+            <div class="field"><label>Due date</label><input type="date" name="due_date" value="${esc(e.due_date)}" required></div>
+            <div class="field"><label>MBOs needed</label><input type="number" name="mbos_needed" min="1" max="50" step="1" value="${e.mbos_needed}" required></div>
+          </div>
+          <div class="row">
+            <div class="field"><label class="check"><input type="checkbox" name="single_reminder" value="1"${e.single_reminder ? ' checked' : ''}> Single reminder only</label>
+              <div class="hint">Sends one reminder on the date below instead of the usual two.</div></div>
+            <div class="field"><label>Send it on</label><input type="date" name="single_reminder_date" value="${esc(e.single_reminder_date || '')}"></div>
+          </div>
+          <button class="btn">Save</button>
+          <button class="btn danger" formaction="/admin/mbos/${e.id}/delete" formnovalidate data-confirm="${esc(`Remove ${e.user_name} from ${label}? Their reminder history for this month is removed too.`)}">Remove from this month</button>
+        </form></details></td></tr>`;
+    })
+    .join('');
+  return page(
+    ctx,
+    'MBO reminders',
+    `<a class="back" href="/admin">&larr; Admin</a>
+    <h1>MBO reminders</h1>
+    <p class="hint">Choose who owes an MBO for a month. They get a Slack DM the first day after month end and ${secondDays} day${secondDays === 1 ? '' : 's'} before the due date, unless they have submitted. Only admins see this page.</p>
+
+    <form method="get" action="/admin/mbos" class="panel">
+      <div class="row"><div class="field"><label for="mbo-month-pick">Month</label><input id="mbo-month-pick" type="month" name="month" value="${esc(month)}" required></div></div>
+      <button class="btn">Show month</button>
+      ${month !== currentMonth ? `<a class="btn secondary" href="/admin/mbos">Current month</a>` : ''}
+    </form>
+
+    <h2>${esc(label)}: ${owed} still owed, ${entries.length - owed} submitted</h2>
+    ${
+      entries.length
+        ? `<table class="list"><thead><tr><th>Person</th><th>Month</th><th>Due</th><th>Status</th><th>Reminders</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
+        : '<p class="muted">Nobody has been added for this month yet.</p>'
+    }
+
+    <details class="panel"${entries.length ? '' : ' open'}>
+      <summary>Add people for ${esc(label)}</summary>
+      <form method="post" action="/admin/mbos">
+        ${csrfField(ctx)}
+        <input type="hidden" name="month" value="${esc(month)}">
+        <div class="field"><label>People</label>
+          <div class="checks">${users
+            .map((u) => `<label class="check"><input type="checkbox" name="user_ids" value="${u.id}"${onList.has(u.id) ? ' disabled' : ''}> ${esc(u.name)}${onList.has(u.id) ? ' <span class="muted">(already listed)</span>' : ''}</label>`)
+            .join('')}</div></div>
+        <div class="row">
+          <div class="field"><label for="mbo-due">Due date</label><input id="mbo-due" type="date" name="due_date" required></div>
+          <div class="field"><label for="mbo-needed">MBOs needed from each person</label><input id="mbo-needed" type="number" name="mbos_needed" min="1" max="50" step="1" value="1" required></div>
+        </div>
+        <p class="hint">Marked Submitted automatically once that many MBOs for this month have been submitted through the portal. For a one-month exception, add the person, then use Edit and tick "Single reminder only".</p>
+        <button class="btn">Add to ${esc(label)}</button>
+      </form>
+    </details>`
+  );
+}
+
 function account(ctx) {
   const u = ctx.user;
   return page(
@@ -980,6 +1066,7 @@ module.exports = {
   reports,
 
   auditPage,
+  mboPage,
   admin,
   account,
   STATUS_LABELS,

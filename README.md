@@ -12,6 +12,10 @@ Payout amounts (Manage Incentives): amounts can be typed or imported from a CSV 
 
 `vercel.json` has a Vercel Cron job that calls `/cron/reminders` daily at 14:00 UTC. On the 1st (America/New_York) it DMs submitters who still have no payout amounts for SPIFs that ended last month ("due by the 3rd"); on the 3rd it sends a follow-up for anything still missing. Each reminder is sent at most once a month. Set `CRON_SECRET` in Vercel (the route rejects calls without it). To test: `GET /cron/reminders?dry=1&force=first` with `Authorization: Bearer <CRON_SECRET>` lists who would be messaged without sending (`today=YYYY-MM-DD` overrides the date).
 
+## MBO reminders
+
+Admins only: **Admin > MBO reminders** (`/admin/mbos`). Pick a month, add people from the user list with a required due date and how many MBOs are needed from each, and the page shows who is Owed or Submitted with reminder status and a "Send reminder now" button. An entry becomes Submitted when that person has submitted that many MBOs for the month through the portal (MBO requests where they are the submitter), or when an admin marks it by hand. Reminders are Slack DMs to the Slack member ID on the user, sent by the same daily cron job: the first day after month end, and `MBO_SECOND_REMINDER_DAYS` (default 2) days before the due date. Neither is sent once the entry is Submitted, each is recorded when sent and never repeated, and "Single reminder only" entries get one reminder on a chosen date instead. `GET /cron/reminders?dry=1&today=YYYY-MM-DD` lists the MBO reminders (under `mbo`) that would go out.
+
 ## Stack
 
 Node + Express, server-rendered pages, hosted on Vercel as a serverless function (`api/index.js` exports the app from `src/server.js`). Data lives in Turso (hosted SQLite, via `@libsql/client`). Documents uploaded to SPIFs before the form moved to links (the supporting document is now an optional link; new uploads are refused) and proof of payout calculations are stored in the same database (`attachment_blobs`), linked to a request version, and counted as part of the approved terms. Vercel rejects request bodies over 4.5 MB, so attachments are limited to 4 MB in total per submission.
@@ -33,6 +37,7 @@ Node + Express, server-rendered pages, hosted on Vercel as a serverless function
 | `ENTRA_REDIRECT_URI` | optional | Defaults to `APP_URL` (or the request host) + `/auth/microsoft/callback`; must match Entra exactly |
 | `BREAK_GLASS_EMAILS` | optional | Comma-separated admins who can still use password sign-in at `/login?admin=1` once SSO is on. Defaults to `ADMIN_EMAIL` |
 | `CRON_SECRET` | for reminders | Long random string. Vercel sends it as `Authorization: Bearer ...` on cron calls; `/cron/reminders` refuses requests without it |
+| `MBO_SECOND_REMINDER_DAYS` | optional | Days before the due date for the second MBO reminder. Defaults to 2 |
 | `SLACK_BOT_TOKEN` | for Slack | Bot token with `chat:write`; sends to channels and DMs |
 | `SLACK_FINANCE_CHANNEL_ID` | for Slack | Channel for "needs finance action" |
 | `SLACK_COMMISSION_CHANNEL_ID` | for Slack | Channel for "needs the commissions team" |

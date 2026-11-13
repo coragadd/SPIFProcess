@@ -77,11 +77,12 @@ const toCommission = (text) => send(process.env.SLACK_COMMISSION_CHANNEL_ID, tex
 // DMs open the conversation with the person first (conversations.open, needs the im:write scope)
 // and post to the DM channel Slack returns, which is more dependable than posting to a user ID.
 async function dm(userId, text) {
+  // Returns true when the message was sent, false when it was not (callers that don't care ignore it).
   const u = await db.prepare('SELECT name, slack_id FROM users WHERE id = ? AND active = 1').get(userId);
-  if (!u) return;
+  if (!u) return false;
   const token = process.env.SLACK_BOT_TOKEN;
-  if (!token) return console.warn(`Slack: not sending to ${u.name}, SLACK_BOT_TOKEN is not set.`);
-  if (!u.slack_id) return console.warn(`Slack: not sending to ${u.name} (no Slack member ID saved in Admin).`);
+  if (!token) return console.warn(`Slack: not sending to ${u.name}, SLACK_BOT_TOKEN is not set.`), false;
+  if (!u.slack_id) return console.warn(`Slack: not sending to ${u.name} (no Slack member ID saved in Admin).`), false;
   const api = process.env.SLACK_API_URL || 'https://slack.com/api';
   const call = (method, payload) =>
     fetch(`${api}/${method}`, {
@@ -97,8 +98,10 @@ async function dm(userId, text) {
     if (!sent.ok) throw new Error(`chat.postMessage: ${sent.error}`);
     const bp = (sent.message || {}).bot_profile;
     console.log(`Slack: DM sent to ${u.name} (${u.slack_id})${bp ? ` as "${bp.name}" (app ${bp.app_id})` : ''}.`);
+    return true;
   } catch (e) {
     console.error(`Slack DM to ${u.name} (${u.slack_id}) failed: ${e.message}`);
+    return false;
   }
 }
 

@@ -75,4 +75,4 @@ async function runReminders(req, opts = {}) {
   return { today, ...(await sendReminders(req, kind, today, !!opts.dry)) };
 }
 
-module.exports = { runReminders, missingAmounts };
+module.exports = { runReminders, missingAmounts, monthName };
