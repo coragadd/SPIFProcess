@@ -7,7 +7,7 @@
 //   second  MBO_SECOND_REMINDER_DAYS days before the due date (default 2), through the due date
 //   single  entries marked "single reminder": one reminder on the date chosen, nothing else
 // Each is claimed in the database before it is sent, so a second run of the job never repeats it.
-const { db, audit } = require('./db');
+const { db, audit, getSetting, setSetting } = require('./db');
 const wf = require('./workflow');
 const { dm, baseUrl } = require('./notify');
 const { monthName } = require('./reminders');
@@ -40,16 +40,66 @@ const SELECT = `
        JOIN request_versions v ON v.request_id = r.id AND v.version = r.current_version
        WHERE r.submitter_id = e.user_id AND r.type = 'bonus' AND r.status IN ('approved', 'finalized')
          AND json_extract(v.data_json, '$.bonus_kind') = 'mbo'
-         AND json_extract(v.data_json, '$.mbo_month') = e.month) AS submitted_count
+         AND json_extract(v.data_json, '$.mbo_month') BETWEEN
+             (CASE WHEN e.kind = 'quarterly' THEN strftime('%Y-%m', e.month || '-01', '-2 months') ELSE e.month END) AND e.month) AS submitted_count
   FROM mbo_expectations e
   JOIN users u ON u.id = e.user_id`;
+
+// "October 2026", or "Q4 2026" for a quarterly entry (its month is the quarter's last month).
+const periodLabel = (e) =>
+  e.kind === 'quarterly' ? `Q${Math.ceil(Number(e.month.slice(5, 7)) / 3)} ${e.month.slice(0, 4)}` : monthName(e.month);
+
+// ------------------------------------------------------------------ standing amounts
+// Each user has mbos_monthly and mbos_quarterly (set in Admin). The entries are created from those, so
+// nobody has to be listed by hand. They need the due day first: the day of the month after the period
+// ends (setting mbo_due_day, 1 to 28). Nothing is hardcoded; until it is set, no entries are created.
+async function dueDay() {
+  const n = parseInt(await getSetting('mbo_due_day'), 10);
+  return Number.isInteger(n) && n >= 1 && n <= 28 ? n : null;
+}
+
+async function setDueDay(actor, value) {
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 1 || n > 28) throw new UserError('Enter a due day from 1 to 28.');
+  const before = await dueDay();
+  await setSetting('mbo_due_day', n);
+  await audit(actor, 'mbo_due_day.updated', 'setting', null, null, { before, after: n });
+}
+
+// Makes sure the current month (and quarter) have an entry for everyone who owes MBOs, and keeps the
+// current period's count in step with the user's setting. Past periods are never touched.
+async function ensureEntries(today) {
+  const day = await dueDay();
+  if (!day) return { skipped: 'due day not set' };
+  const month = today.slice(0, 7);
+  const qEnd = wf.quarterEnd(today).slice(0, 7);
+  const dueIn = (period) => `${wf.firstOfNextMonth(period + '-01').slice(0, 7)}-${String(day).padStart(2, '0')}`;
+  const users = await db.prepare('SELECT id, mbos_monthly, mbos_quarterly FROM users WHERE active = 1').all();
+  for (const [kind, period, field] of [['monthly', month, 'mbos_monthly'], ['quarterly', qEnd, 'mbos_quarterly']]) {
+    for (const u of users) {
+      const want = u[field];
+      const row = await db.prepare('SELECT id, mbos_needed, reminder1_sent_at, reminder2_sent_at FROM mbo_expectations WHERE user_id = ? AND month = ? AND kind = ?').get(u.id, period, kind);
+      if (want > 0 && !row) {
+        const info = await db
+          .prepare('INSERT OR IGNORE INTO mbo_expectations (user_id, month, kind, due_date, mbos_needed) VALUES (?, ?, ?, ?, ?)')
+          .run(u.id, period, kind, dueIn(period), want);
+        if (info.changes) await audit(null, 'mbo_entry.created', 'mbo_expectation', info.lastInsertRowid, null, { user_id: u.id, month: period, kind, mbos_needed: want, via: 'standing amount' });
+      } else if (row && want > 0 && row.mbos_needed !== want) {
+        await db.prepare('UPDATE mbo_expectations SET mbos_needed = ? WHERE id = ?').run(want, row.id);
+      } else if (row && want === 0 && !row.reminder1_sent_at && !row.reminder2_sent_at) {
+        await db.prepare('DELETE FROM mbo_expectations WHERE id = ?').run(row.id);
+      }
+    }
+  }
+  return { ok: true };
+}
 
 function decorate(e) {
   const submitted = !!e.manual_submitted || e.submitted_count >= e.mbos_needed;
   const stage = e.single_reminder
     ? e.reminder1_sent_at ? 'Single reminder sent' : 'Not sent'
     : e.reminder2_sent_at ? 'Second sent' : e.reminder1_sent_at ? 'First sent' : 'Not sent';
-  return { ...e, submitted, reminderStatus: stage };
+  return { ...e, submitted, reminderStatus: stage, label: periodLabel(e) };
 }
 
 async function listForMonth(month) {
@@ -134,7 +184,7 @@ function message(req, e) {
   const left = e.mbos_needed - e.submitted_count;
   const more = e.mbos_needed > 1 && left > 0 ? ` You still need to submit ${left} of ${e.mbos_needed}.` : '';
   return (
-    `*${monthName(e.month)} MBO due ${wf.dateLabel(e.due_date)}.*\n` +
+    `*${e.kind === 'quarterly' ? `${e.label} quarterly MBOs` : `${e.label} MBO`} due ${wf.dateLabel(e.due_date)}.*\n` +
     `MBOs that aren't submitted aren't calculated.${more}\n` +
     `<${baseUrl(req)}/requests/new?type=mbo|Submit your MBO>`
   );
@@ -167,6 +217,7 @@ async function sendScheduled(req, e, kind) {
 // opts.today (YYYY-MM-DD) is for testing; opts.dry lists what would be sent without sending.
 async function runMboReminders(req, opts = {}) {
   const today = opts.today || wf.todayIn(TZ);
+  if (!opts.dry) await ensureEntries(today);
   const open = await db
     .prepare(
       SELECT +
@@ -204,6 +255,9 @@ module.exports = {
   validMonth,
   secondReminderDays,
   listForMonth,
+  ensureEntries,
+  dueDay,
+  setDueDay,
   createEntries,
   updateEntry,
   setManualSubmitted,

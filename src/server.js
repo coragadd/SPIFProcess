@@ -962,7 +962,14 @@ async function cleanUserInput(body, selfId, legacy) {
   } else if (role === 'submitter' && tier === 2) {
     tier1Id = await pick('tier1_id', 1, 'approver');
   }
-  return { name, email, role, financeViewer, tier, tier1Id, tier2Id, timezone, password, slackId: slackId || null };
+  const count = (v, label) => {
+    const n = v === undefined || v === '' ? 0 : Number(v);
+    if (!Number.isInteger(n) || n < 0 || n > 99) throw new UserError(`${label} must be a whole number from 0 to 99.`);
+    return n;
+  };
+  const mbosMonthly = count(body.mbos_monthly, 'Monthly MBOs');
+  const mbosQuarterly = count(body.mbos_quarterly, 'Quarterly MBOs');
+  return { name, email, role, financeViewer, tier, tier1Id, tier2Id, timezone, password, slackId: slackId || null, mbosMonthly, mbosQuarterly };
 }
 
 function constraintToUserError(e) {
@@ -985,7 +992,10 @@ app.post(
           'INSERT INTO users (name, email, password_hash, role, finance_viewer, tier, tier1_id, tier2_id, timezone, slack_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
         )
         .run(u.name, u.email, bcrypt.hashSync(u.password || crypto.randomBytes(24).toString('hex'), 10), u.role, u.financeViewer, tier, u.tier1Id, u.tier2Id, u.timezone, u.slackId);
+      await db.prepare('UPDATE users SET mbos_monthly = ?, mbos_quarterly = ? WHERE id = ?').run(u.mbosMonthly, u.mbosQuarterly, info.lastInsertRowid);
       await audit(req.user, 'user.created', 'user', info.lastInsertRowid, null, {
+        mbos_monthly: u.mbosMonthly,
+        mbos_quarterly: u.mbosQuarterly,
         email: u.email,
         role: u.role,
         finance_viewer: u.financeViewer,
@@ -1031,13 +1041,14 @@ app.post(
         active,
         id
       );
+      await db.prepare('UPDATE users SET mbos_monthly = ?, mbos_quarterly = ? WHERE id = ?').run(u.mbosMonthly, u.mbosQuarterly, id);
       if (u.password) await db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(bcrypt.hashSync(u.password, 10), id);
     } catch (e) {
       throw constraintToUserError(e);
     }
     await audit(req.user, 'user.updated', 'user', id, null, {
-      before: { name: before.name, email: before.email, role: before.role, finance_viewer: before.finance_viewer, tier: before.tier, active: before.active, timezone: before.timezone, slack_id: before.slack_id, tier1_id: before.tier1_id, tier2_id: before.tier2_id },
-      after: { name: u.name, email: u.email, role: u.role, finance_viewer: u.financeViewer, tier, tier1_id: u.tier1Id, tier2_id: u.tier2Id, active, timezone: u.timezone, slack_id: u.slackId },
+      before: { name: before.name, email: before.email, role: before.role, finance_viewer: before.finance_viewer, tier: before.tier, active: before.active, timezone: before.timezone, slack_id: before.slack_id, tier1_id: before.tier1_id, tier2_id: before.tier2_id, mbos_monthly: before.mbos_monthly, mbos_quarterly: before.mbos_quarterly },
+      after: { mbos_monthly: u.mbosMonthly, mbos_quarterly: u.mbosQuarterly, name: u.name, email: u.email, role: u.role, finance_viewer: u.financeViewer, tier, tier1_id: u.tier1Id, tier2_id: u.tier2Id, active, timezone: u.timezone, slack_id: u.slackId },
       passwordChanged: !!u.password,
     });
     flash(req, 'success', `Saved ${u.name}.`);
@@ -1097,15 +1108,28 @@ app.get(
   wrap(async (req, res) => {
     const today = wf.todayIn(req.user.timezone);
     const month = mboMonth(req.query.month, today.slice(0, 7));
+    await mbos.ensureEntries(today);
     res.send(
       views.mboPage(ctx(req), {
         month,
         currentMonth: today.slice(0, 7),
         entries: await mbos.listForMonth(month),
         users: await db.prepare('SELECT id, name FROM users WHERE active = 1 ORDER BY name').all(),
+        dueDay: await mbos.dueDay(),
         secondDays: mbos.secondReminderDays(),
       })
     );
+  })
+);
+
+app.post(
+  '/admin/mbos/due-day',
+  requireRole('admin'),
+  wrap(async (req, res) => {
+    await mbos.setDueDay(req.user, req.body.due_day);
+    await mbos.ensureEntries(wf.todayIn(req.user.timezone));
+    flash(req, 'success', 'Saved the due day. Entries are now created from each person\'s monthly and quarterly MBO amounts.');
+    res.redirect('/admin/mbos');
   })
 );
 

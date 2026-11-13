@@ -227,6 +227,8 @@ CREATE TABLE IF NOT EXISTS mbo_expectations (
   due_date TEXT NOT NULL,
   mbos_needed INTEGER NOT NULL DEFAULT 1,
   manual_submitted INTEGER NOT NULL DEFAULT 0,
+  -- 'monthly', or 'quarterly' (month is then the last month of the quarter).
+  kind TEXT NOT NULL DEFAULT 'monthly',
   single_reminder INTEGER NOT NULL DEFAULT 0,
   single_reminder_date TEXT,
   reminder1_sent_at TEXT,
@@ -234,7 +236,7 @@ CREATE TABLE IF NOT EXISTS mbo_expectations (
   manual_reminder_at TEXT,
   created_by INTEGER REFERENCES users(id),
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
-  UNIQUE (user_id, month)
+  UNIQUE (user_id, month, kind)
 );
 CREATE INDEX IF NOT EXISTS idx_mbo_expectations_month ON mbo_expectations(month);
 
@@ -358,7 +360,19 @@ let readyPromise = null;
 function ready() {
   if (!readyPromise) {
     readyPromise = (async () => {
+      // The first MBO table had no kind column and a narrower unique key: move its rows into the new one.
+      const oldMbo = (await client.execute('PRAGMA table_info(mbo_expectations)')).rows.map((c) => c.name);
+      const rebuildMbo = oldMbo.length > 0 && !oldMbo.includes('kind');
+      if (rebuildMbo) {
+        await client.execute('DROP INDEX IF EXISTS idx_mbo_expectations_month');
+        await client.execute('ALTER TABLE mbo_expectations RENAME TO mbo_expectations_old');
+      }
       await client.executeMultiple(SCHEMA);
+      if (rebuildMbo) {
+        await client.execute(`INSERT INTO mbo_expectations (id, user_id, month, due_date, mbos_needed, manual_submitted, single_reminder, single_reminder_date, reminder1_sent_at, reminder2_sent_at, manual_reminder_at, created_by, created_at)
+          SELECT id, user_id, month, due_date, mbos_needed, manual_submitted, single_reminder, single_reminder_date, reminder1_sent_at, reminder2_sent_at, manual_reminder_at, created_by, created_at FROM mbo_expectations_old`);
+        await client.execute('DROP TABLE mbo_expectations_old');
+      }
       // Databases created before finance viewers existed lack the column.
       const cols = (await client.execute('PRAGMA table_info(users)')).rows.map((c) => c.name);
       if (!cols.includes('finance_viewer')) {
@@ -368,6 +382,9 @@ function ready() {
       if (!cols.includes('entra_oid')) {
         await client.execute('ALTER TABLE users ADD COLUMN entra_oid TEXT');
       }
+      // How many MBOs a person owes each month and each quarter (0 = none); the MBO page creates their entries.
+      if (!cols.includes('mbos_monthly')) await client.execute('ALTER TABLE users ADD COLUMN mbos_monthly INTEGER NOT NULL DEFAULT 0');
+      if (!cols.includes('mbos_quarterly')) await client.execute('ALTER TABLE users ADD COLUMN mbos_quarterly INTEGER NOT NULL DEFAULT 0');
       // 1 when an admin made the decision on someone's behalf (shown as "(admin)").
       const stepCols = (await client.execute('PRAGMA table_info(approval_steps)')).rows.map((c) => c.name);
       if (!stepCols.includes('by_admin')) {

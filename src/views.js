@@ -904,6 +904,8 @@ function admin(ctx, o) {
         ${reportFields(null)}
         <div class="row">
           <div class="field"><label>Slack member ID (optional)</label><input name="slack_id" placeholder="U01ABCDE234"></div>
+          <div class="field"><label>MBOs owed each month</label><input name="mbos_monthly" type="number" min="0" max="99" step="1" value="0"></div>
+          <div class="field"><label>MBOs owed each quarter</label><input name="mbos_quarterly" type="number" min="0" max="99" step="1" value="0"></div>
           <div class="field"><label>Temporary password (leave blank when using Microsoft sign-in; min 10 characters)</label><input name="password" type="password" autocomplete="new-password"></div>
         </div>
         <button class="btn">Add user</button>
@@ -935,6 +937,8 @@ function admin(ctx, o) {
       ${reportFields(u)}
       <div class="row">
         <div class="field"><label>Slack member ID (optional)</label><input name="slack_id" value="${esc(u.slack_id || '')}" placeholder="U01ABCDE234"></div>
+        <div class="field"><label>MBOs owed each month</label><input name="mbos_monthly" type="number" min="0" max="99" step="1" value="${u.mbos_monthly || 0}"></div>
+        <div class="field"><label>MBOs owed each quarter</label><input name="mbos_quarterly" type="number" min="0" max="99" step="1" value="${u.mbos_quarterly || 0}"></div>
         <div class="field"><label>New password (leave blank to keep)</label><input name="password" type="password" autocomplete="new-password"></div>
       </div>
       <button class="btn">Save ${esc(u.name)}</button>
@@ -953,7 +957,7 @@ function admin(ctx, o) {
 
 // Admin only: who owes an MBO for a month, reminder status, and the controls.
 function mboPage(ctx, o) {
-  const { month, currentMonth, entries, users, secondDays } = o;
+  const { month, currentMonth, entries, users, secondDays, dueDay } = o;
   const tz = ctx.user.timezone;
   const label = `${dateLabel(month + '-01').split(' ')[0]} ${month.slice(0, 4)}`;
   const owed = entries.filter((e) => !e.submitted).length;
@@ -970,7 +974,7 @@ function mboPage(ctx, o) {
       const source = e.manual_submitted ? ' (marked by hand)' : '';
       return `<tr>
         <td>${esc(e.user_name)}${e.user_active ? '' : ' <span class="muted">(inactive)</span>'}</td>
-        <td>${esc(label)}</td>
+        <td>${esc(e.label)}${e.kind === 'quarterly' ? ' <span class="hint">(quarterly)</span>' : ''}</td>
         <td>${esc(dateLabel(e.due_date))}, ${esc(e.due_date.slice(0, 4))}</td>
         <td><span class="pill ${e.submitted ? 's-approved' : 's-returned'}">${e.submitted ? 'Submitted' : 'Owed'}</span>
           <div class="hint">${e.submitted_count} of ${e.mbos_needed} in the portal${esc(source)}</div></td>
@@ -991,7 +995,7 @@ function mboPage(ctx, o) {
             <div class="field"><label>Send it on</label><input type="date" name="single_reminder_date" value="${esc(e.single_reminder_date || '')}"></div>
           </div>
           <button class="btn">Save</button>
-          <button class="btn danger" formaction="/admin/mbos/${e.id}/delete" formnovalidate data-confirm="${esc(`Remove ${e.user_name} from ${label}? Their reminder history for this month is removed too.`)}">Remove from this month</button>
+          <button class="btn danger" formaction="/admin/mbos/${e.id}/delete" formnovalidate data-confirm="${esc(`Remove ${e.user_name} from ${e.label}? Their reminder history for it is removed too. If they still owe MBOs in their Admin settings, the entry is created again.`)}">Remove from this month</button>
         </form></details></td></tr>`;
     })
     .join('');
@@ -1000,7 +1004,15 @@ function mboPage(ctx, o) {
     'MBO reminders',
     `<a class="back" href="/admin">&larr; Admin</a>
     <h1>MBO reminders</h1>
-    <p class="hint">Choose who owes an MBO for a month. They get a Slack DM the first day after month end and ${secondDays} day${secondDays === 1 ? '' : 's'} before the due date, unless they have submitted. Only admins see this page.</p>
+    <p class="hint">Set how many MBOs a person owes each month and each quarter by opening them in Admin. Entries are created automatically from that. They get a Slack DM the first day after the period ends and ${secondDays} day${secondDays === 1 ? '' : 's'} before the due date, unless they have submitted. Quarterly entries count every MBO in the quarter's three months and appear under the quarter's last month. Only admins see this page.</p>
+
+    <form method="post" action="/admin/mbos/due-day" class="panel">
+      ${csrfField(ctx)}
+      <div class="row"><div class="field"><label for="mbo-due-day">Due day of the month after each period ends</label>
+        <input id="mbo-due-day" type="number" name="due_day" min="1" max="28" step="1" value="${dueDay || ''}" required>
+        <div class="hint">${dueDay ? 'Applies to entries created from now on; edit an entry to change its own due date.' : 'Required before any entries are created automatically.'}</div></div></div>
+      <button class="btn">Save due day</button>
+    </form>
 
     <form method="get" action="/admin/mbos" class="panel">
       <div class="row"><div class="field"><label for="mbo-month-pick">Month</label><input id="mbo-month-pick" type="month" name="month" value="${esc(month)}" required></div></div>
@@ -1016,7 +1028,7 @@ function mboPage(ctx, o) {
     }
 
     <details class="panel"${entries.length ? '' : ' open'}>
-      <summary>Add people for ${esc(label)}</summary>
+      <summary>Add a one-off for ${esc(label)} (people without a standing amount)</summary>
       <form method="post" action="/admin/mbos">
         ${csrfField(ctx)}
         <input type="hidden" name="month" value="${esc(month)}">
